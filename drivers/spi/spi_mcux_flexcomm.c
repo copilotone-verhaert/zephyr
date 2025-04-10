@@ -8,6 +8,7 @@
 #define DT_DRV_COMPAT nxp_lpc_spi
 
 #include <errno.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/spi/rtio.h>
 #include <zephyr/drivers/clock_control.h>
@@ -73,6 +74,9 @@ struct spi_mcux_data {
 	uint32_t last_word;
 #endif
 };
+
+static int wait_dma_rx_tx_done(const struct device *dev);
+void cleanup_dma_context(const struct device *spi_dev, int status);
 
 static void spi_mcux_transfer_next_packet(const struct device *dev)
 {
@@ -327,6 +331,10 @@ static void spi_mcux_dma_callback(const struct device *dev, void *arg,
 		}
 	}
 
+#ifdef CONFIG_DMA_NO_WAIT
+	cleanup_dma_context(spi_dev, 0);
+#endif // CONFIG_DMA_NO_WAIT
+
 	spi_context_complete(&data->ctx, spi_dev, 0);
 }
 
@@ -441,6 +449,7 @@ static int spi_mcux_dma_tx_load(const struct device *dev, const uint8_t *buf,
 		if (last_packet) {
 			spi_mcux_prepare_txlastword(&data->last_word, buf, spi_cfg, len, rx_ignore);
 		}
+
 		/* If last packet and data transfer frame is bigger then 1,
 		 * use dma descriptor to send the last data.
 		 */
@@ -478,6 +487,7 @@ static int spi_mcux_dma_tx_load(const struct device *dev, const uint8_t *buf,
 	/* give the client dev as arg, as the callback comes from the dma */
 	stream->dma_cfg.user_data = (struct device *)dev;
 	/* pass our client origin to the dma: data->dma_tx.dma_channel */
+
 	ret = dma_config(data->dma_tx.dma_dev, data->dma_tx.channel,
 			&stream->dma_cfg);
 	/* the channel is the actual stream from 0 */
@@ -505,7 +515,9 @@ static int spi_mcux_dma_tx_load(const struct device *dev, const uint8_t *buf,
 	}
 
 	/* gives the request ID */
-	return dma_start(data->dma_tx.dma_dev, data->dma_tx.channel);
+	ret = dma_start(data->dma_tx.dma_dev, data->dma_tx.channel);
+
+	return ret;
 }
 
 static int spi_mcux_dma_rx_load(const struct device *dev, uint8_t *buf,
@@ -567,8 +579,7 @@ static int spi_mcux_dma_move_buffers(const struct device *dev, size_t len,
 		return ret;
 	}
 
-	ret = spi_mcux_dma_tx_load(dev, data->ctx.tx_buf, spi_cfg,
-				   len, last_packet, rx_ignore);
+	ret = spi_mcux_dma_tx_load(dev, data->ctx.tx_buf, spi_cfg, len, last_packet, rx_ignore);
 
 	return ret;
 }
@@ -602,6 +613,7 @@ static int transceive_dma(const struct device *dev,
 	const struct spi_mcux_config *config = dev->config;
 	struct spi_mcux_data *data = dev->data;
 	SPI_Type *base = config->base;
+
 	int ret;
 	uint32_t word_size;
 	uint16_t data_size;
@@ -667,7 +679,7 @@ static int transceive_dma(const struct device *dev,
 			 * want to deassert CS.
 			 */
 			if ((data->ctx.tx_count > 1) ||
-			    (data->ctx.rx_count > 1)) {
+				(data->ctx.rx_count > 1)) {
 				/* more buffers to transfer so
 				 * this isn't last
 				 */
@@ -678,30 +690,52 @@ static int transceive_dma(const struct device *dev,
 		data->status_flags = 0;
 
 		ret = spi_mcux_dma_move_buffers(dev, dma_len, spi_cfg, last);
-		if (ret != 0) {
-			break;
-		}
 
-		ret = wait_dma_rx_tx_done(dev);
-		if (ret != 0) {
-			break;
+#ifdef CONFIG_DMA_NO_WAIT
+		if (asynchronous) {
+			if (ret != 0) {
+				cleanup_dma_context(dev, ret);
+				break;
+			}
 		}
+		else
+#endif // CONFIG_DMA_NO_WAIT
+		{
+			if (ret != 0) {
+				break;
+			}
 
-		/* wait until TX FIFO is really empty */
-		while (0U == (base->FIFOSTAT & SPI_FIFOSTAT_TXEMPTY_MASK)) {
+			ret = wait_dma_rx_tx_done(dev);
+			if (ret != 0) {
+				break;
+			}
+
+			/* wait until TX FIFO is really empty */
+			while (0U == (base->FIFOSTAT & SPI_FIFOSTAT_TXEMPTY_MASK)) {
+			}
 		}
 
 		spi_context_update_tx(&data->ctx, 1, dma_len);
 		spi_context_update_rx(&data->ctx, 1, dma_len);
 	}
 
-	base->FIFOCFG &= ~SPI_FIFOCFG_DMATX_MASK;
-	base->FIFOCFG &= ~SPI_FIFOCFG_DMARX_MASK;
+#ifdef CONFIG_DMA_NO_WAIT
+	if (!asynchronous)
+#endif // CONFIG_DMA_NO_WAIT
+	{
+		base->FIFOCFG &= ~SPI_FIFOCFG_DMATX_MASK;
+		base->FIFOCFG &= ~SPI_FIFOCFG_DMARX_MASK;
 
-	spi_context_cs_control(&data->ctx, false);
+		spi_context_cs_control(&data->ctx, false);
+	}
 
 out:
-	spi_context_release(&data->ctx, ret);
+#ifdef CONFIG_DMA_NO_WAIT
+	if (!asynchronous)
+#endif // CONFIG_DMA_NO_WAIT
+	{
+		spi_context_release(&data->ctx, ret);
+	}
 
 	return ret;
 }
@@ -765,6 +799,38 @@ static int spi_mcux_transceive_async(const struct device *dev,
 	return transceive(dev, spi_cfg, tx_bufs, rx_bufs, true, cb, userdata);
 }
 #endif /* CONFIG_SPI_ASYNC */
+
+void cleanup_dma_context(const struct device *spi_dev, int status)
+{
+	const struct spi_mcux_config *config = spi_dev->config;
+	struct spi_mcux_data *data = spi_dev->data;
+	SPI_Type *base = config->base;
+
+	if (status != 0) {
+		LOG_ERR("spi_mcux_dma_move_buffers failed (%d)", status);
+	}
+	else {
+		status = wait_dma_rx_tx_done(spi_dev);
+		if (status != 0) {
+			LOG_ERR("wait_dma_rx_tx_done failed (%d)", status);
+		}
+		else {
+			/* wait until TX FIFO is really empty */
+			while (0U == (base->FIFOSTAT & SPI_FIFOSTAT_TXEMPTY_MASK)) {
+			}
+
+			//spi_context_update_tx(&data->ctx, 1, data->ctx.tx_len);
+			//spi_context_update_rx(&data->ctx, 1, data->ctx.rx_len);
+		}
+	}
+
+	base->FIFOCFG &= ~SPI_FIFOCFG_DMATX_MASK;
+	base->FIFOCFG &= ~SPI_FIFOCFG_DMARX_MASK;
+
+	spi_context_cs_control(&data->ctx, false);
+
+	spi_context_release(&data->ctx, status);
+}
 
 static int spi_mcux_release(const struct device *dev,
 			    const struct spi_config *spi_cfg)
