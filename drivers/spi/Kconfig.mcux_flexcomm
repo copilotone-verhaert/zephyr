@@ -32,4 +32,14 @@ config SPI_MCUX_FLEXCOMM_DMA_MAX_BLOCKS
 	  for the last word so that a final one word buffer can be used to set the
 	  end of transfer bit which will release the CS.
 
+	if SPI_MCUX_FLEXCOMM_DMA && SPI_ASYNC
+		config DMA_NO_WAIT
+			bool "Don't wait for DMA transfer to finish"
+			default n
+			help
+				By default the SPI_MCUX_FLEXCOMM driver waits for the
+				DMA transfer to be done and the SPI TX FIFO to be empty.
+				When this option is enabled, the driver will not wait
+				to finish and will return immediately.
+	endif # SPI_MCUX_FLEXCOMM_DMA
 endif # SPI_MCUX_FLEXCOMM

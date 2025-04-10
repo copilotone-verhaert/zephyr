@@ -8,6 +8,7 @@
 #define DT_DRV_COMPAT nxp_lpc_spi
 
 #include <errno.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/spi/rtio.h>
 #include <zephyr/drivers/clock_control.h>
@@ -67,6 +68,7 @@ struct stream {
 	uint32_t channel; /* stores the channel for dma */
 	struct dma_config dma_cfg;
 	struct dma_block_config dma_blk_cfg[CONFIG_SPI_MCUX_FLEXCOMM_DMA_MAX_BLOCKS];
+	int wait_for_dma_status;
 };
 #endif
 
@@ -89,6 +91,8 @@ struct spi_mcux_data {
 };
 
 static bool force_reconfig;
+static int wait_dma_rx_tx_done(const struct device *dev);
+void cleanup_dma_context(const struct device *spi_dev, int status);
 
 static void spi_mcux_transfer_next_packet(const struct device *dev)
 {
@@ -200,6 +204,7 @@ static int spi_mcux_configure(const struct device *dev,
 	struct spi_context *ctx = &data->ctx;
 	SPI_Type *base = config->base;
 	uint32_t clock_freq;
+	uint32_t word_size;
 
 	if ((spi_context_configured(ctx, spi_cfg)) && (!force_reconfig)) {
 		/* This configuration is already in use */
@@ -211,6 +216,13 @@ static int spi_mcux_configure(const struct device *dev,
 	if (spi_cfg->operation & SPI_HALF_DUPLEX) {
 		LOG_ERR("Half-duplex not supported");
 		return -ENOTSUP;
+	}
+
+	word_size = SPI_WORD_SIZE_GET(spi_cfg->operation);
+	if (word_size > SPI_MAX_DATA_WIDTH) {
+		LOG_ERR("Word size %d is greater than %d",
+			    word_size, SPI_MAX_DATA_WIDTH);
+		return -EINVAL;
 	}
 
 	/*
@@ -346,6 +358,9 @@ static void spi_mcux_dma_callback(const struct device *dev, void *arg,
 	} else {
 		/* identify the origin of this callback */
 		if (channel == data->dma_tx.channel) {
+			if (status != data->dma_tx.wait_for_dma_status) {
+				return;
+			}
 			/* this part of the transfer ends */
 			data->status_flags |= SPI_MCUX_FLEXCOMM_DMA_TX_DONE_FLAG;
 		} else if (channel == data->dma_rx.channel) {
@@ -365,6 +380,12 @@ static void spi_mcux_dma_callback(const struct device *dev, void *arg,
 			pm_policy_device_power_lock_put(dev);
 		}
 	}
+
+#ifdef CONFIG_DMA_NO_WAIT
+	cleanup_dma_context(spi_dev, 0);
+#endif // CONFIG_DMA_NO_WAIT
+
+	spi_context_complete(&data->ctx, spi_dev, 0);
 }
 
 static uint32_t spi_mcux_get_tx_word(uint32_t value, const struct spi_config *spi_cfg,
