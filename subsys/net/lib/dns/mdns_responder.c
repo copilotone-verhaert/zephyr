@@ -239,6 +239,7 @@ static int get_socket(net_sa_family_t family)
 	ret = zsock_socket(family, NET_SOCK_DGRAM, NET_IPPROTO_UDP);
 	if (ret < 0) {
 		ret = -errno;
+		NET_DBG("Cannot get socket (%d)", ret);
 	}
 
 	return ret;
@@ -275,19 +276,23 @@ static void setup_dns_hdr(uint8_t *buf, uint16_t answers)
 static void add_answer(struct net_buf *query, enum dns_rr_type qtype,
 		       uint32_t ttl, uint16_t addr_len, uint8_t *addr)
 {
-	char *dot = query->data + DNS_MSG_HEADER_SIZE + 1;
-	char *prev = query->data + DNS_MSG_HEADER_SIZE;
+	char *dot = query->data + DNS_MSG_HEADER_SIZE;
+	char *prev = NULL;
 	uint16_t offset;
 
-	/* For the length of the first label. */
-	query->len += 1;
+	while ((dot = strchr(dot, '.'))) {
+		if (!prev) {
+			prev = dot++;
+			continue;
+		}
 
-	while ((dot = strchr(dot, '.')) != NULL) {
 		*prev = dot - prev - 1;
 		prev = dot++;
 	}
 
-	*prev = strlen(prev + 1);
+	if (prev) {
+		*prev = strlen(prev) - 1;
+	}
 
 	/* terminator byte (0x00) */
 	query->len += 1;
@@ -297,7 +302,7 @@ static void add_answer(struct net_buf *query, enum dns_rr_type qtype,
 
 	/* Bit 15 tells to flush the cache */
 	offset += DNS_QTYPE_LEN;
-	UNALIGNED_PUT(net_htons(DNS_CLASS_IN | BIT(15)),
+	UNALIGNED_PUT(htons(DNS_CLASS_IN | BIT(15)),
 		      (uint16_t *)(query->data+offset));
 
 
@@ -319,15 +324,14 @@ static int create_answer(int sock,
 	/* Prepare the response into the query buffer: move the name
 	 * query buffer has to get enough free space: dns_hdr + answer
 	 */
-	if ((net_buf_max_len(query) - query->len) < (DNS_MSG_HEADER_SIZE + 1 +
+	if ((net_buf_max_len(query) - query->len) < (DNS_MSG_HEADER_SIZE +
 					  DNS_QTYPE_LEN + DNS_QCLASS_LEN +
 					  DNS_TTL_LEN + DNS_RDLENGTH_LEN +
 					  addr_len)) {
 		return -ENOBUFS;
 	}
 
-	/* +1 for the initial label length */
-	memmove(query->data + DNS_MSG_HEADER_SIZE + 1, query->data, query->len);
+	memmove(query->data + DNS_MSG_HEADER_SIZE, query->data, query->len);
 
 	setup_dns_hdr(query->data, 1);
 
@@ -341,20 +345,19 @@ static int create_answer(int sock,
 }
 
 static int send_response(int sock,
-			 net_sa_family_t family,
-			 struct net_sockaddr *src_addr,
+			 sa_family_t family,
+			 struct sockaddr *src_addr,
 			 size_t addrlen,
 			 struct net_buf *query,
 			 enum dns_rr_type qtype)
 {
 	struct net_if *iface;
-	net_socklen_t dst_len;
+	socklen_t dst_len;
 	int ret;
 	COND_CODE_1(IS_ENABLED(CONFIG_NET_IPV6),
 		    (struct net_sockaddr_in6), (struct net_sockaddr_in)) dst;
 
-	ret = setup_dst_addr(sock, family, src_addr, addrlen,
-			     (struct net_sockaddr *)&dst, &dst_len);
+	ret = setup_dst_addr(sock, family, (struct net_sockaddr *)&dst, &dst_len);
 	if (ret < 0) {
 		NET_DBG("unable to set up the response address");
 		return ret;
@@ -466,8 +469,7 @@ static void send_sd_response(int sock,
 	label[2] = proto_buf;
 	label[3] = domain_buf;
 
-	ret = setup_dst_addr(sock, family, src_addr, addrlen,
-			     (struct net_sockaddr *)&dst, &dst_len);
+	ret = setup_dst_addr(sock, family, (struct net_sockaddr *)&dst, &dst_len);
 	if (ret < 0) {
 		NET_DBG("unable to set up the response address");
 		return;
@@ -598,7 +600,7 @@ static int dns_read(int sock,
 	int queries;
 	int ret;
 
-	data_len = MIN(len, MDNS_RESOLVER_BUF_SIZE);
+	data_len = MIN(len, DNS_RESOLVER_MAX_BUF_SIZE);
 
 	/* Store the DNS query name into a temporary net_buf, which will be
 	 * eventually used to send a response
@@ -643,7 +645,7 @@ static int dns_read(int sock,
 		}
 
 		/* Handle only .local queries */
-		lquery = strrchr(result->data, '.');
+		lquery = strrchr(result->data + 1, '.');
 		if (!lquery || memcmp(lquery, (const void *){ ".local" }, 7)) {
 			continue;
 		}
@@ -656,9 +658,9 @@ static int dns_read(int sock,
 		 * We skip the first dot, and make sure there is dot after
 		 * matching hostname.
 		 */
-		if (!strncasecmp(hostname, result->data, hostname_len) &&
-		    (result->len) >= hostname_len &&
-		    &result->data[hostname_len] == lquery) {
+		if (!strncasecmp(hostname, result->data + 1, hostname_len) &&
+		    (result->len - 1) >= hostname_len &&
+		    &(result->data + 1)[hostname_len] == lquery) {
 			NET_DBG("%s %s %s to our hostname %s%s", "mDNS",
 				family == NET_AF_INET ? "IPv4" : "IPv6", "query",
 				hostname, ".local");
@@ -852,7 +854,7 @@ static int send_probe(struct mdns_responder_context *ctx)
 		goto out;
 	}
 
-	if (ctx->dispatcher.local_addr.sa_family == NET_AF_INET) {
+	if (ctx->dispatcher.local_addr.sa_family == AF_INET) {
 		create_ipv4_addr((struct net_sockaddr_in *)&server);
 	} else {
 		create_ipv6_addr(&server);
@@ -1148,7 +1150,7 @@ static void setup_ipv6_addr(struct net_sockaddr_in6 *local_addr)
 #if defined(CONFIG_NET_IPV4)
 static void iface_ipv4_cb(struct net_if *iface, void *user_data)
 {
-	struct net_in_addr *addr = user_data;
+	struct ne_in_addr *addr = user_data;
 	int ret;
 
 	if (!net_if_is_up(iface)) {
@@ -1366,8 +1368,7 @@ static int init_listener(void)
 				ifindex, ret);
 		} else {
 			memset(&if_req, 0, sizeof(if_req));
-			memcpy(if_req.ifr_name, name,
-			       MIN(sizeof(name) - 1, sizeof(if_req.ifr_name) - 1));
+			strncpy(if_req.ifr_name, name, sizeof(if_req.ifr_name) - 1);
 
 			ret = zsock_setsockopt(v6, ZSOCK_SOL_SOCKET, ZSOCK_SO_BINDTODEVICE,
 					       &if_req, sizeof(if_req));
@@ -1463,8 +1464,7 @@ static int init_listener(void)
 				ifindex, ret);
 		} else {
 			memset(&if_req, 0, sizeof(if_req));
-			memcpy(if_req.ifr_name, name,
-			       MIN(sizeof(name) - 1, sizeof(if_req.ifr_name) - 1));
+			strncpy(if_req.ifr_name, name, sizeof(if_req.ifr_name) - 1);
 
 			ret = zsock_setsockopt(v4, ZSOCK_SOL_SOCKET, ZSOCK_SO_BINDTODEVICE,
 					       &if_req, sizeof(if_req));
@@ -1541,7 +1541,7 @@ static int send_unsolicited_response(struct net_if *iface,
 	COND_CODE_1(IS_ENABLED(CONFIG_NET_IPV6),
 		    (struct net_sockaddr_in6), (struct net_sockaddr_in)) dst;
 
-	ret = setup_dst_addr(sock, family, NULL, 0, (struct net_sockaddr *)&dst, &dst_len);
+	ret = setup_dst_addr(sock, family, (struct net_sockaddr *)&dst, &dst_len);
 	if (ret < 0) {
 		NET_DBG("unable to set up the response address");
 		return ret;
