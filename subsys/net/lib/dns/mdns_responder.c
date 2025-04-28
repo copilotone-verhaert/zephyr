@@ -115,8 +115,9 @@ static int setup_dst_addr(int sock, sa_family_t family,
 #define DNS_RESOLVER_BUF_CTR	(DNS_RESOLVER_MIN_BUF + \
 				 CONFIG_MDNS_RESOLVER_ADDITIONAL_BUF_CTR)
 
+#define MDNS_RESOLVER_MAX_BUF_SIZE 1024
 NET_BUF_POOL_DEFINE(mdns_msg_pool, DNS_RESOLVER_BUF_CTR,
-		    DNS_RESOLVER_MAX_BUF_SIZE, 0, NULL);
+		    MDNS_RESOLVER_MAX_BUF_SIZE, 0, NULL);
 
 static void create_ipv6_addr(struct sockaddr_in6 *addr)
 {
