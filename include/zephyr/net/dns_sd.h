@@ -109,7 +109,27 @@ extern "C" {
  */
 #define DNS_SD_REGISTER_SERVICE(_id, _instance, _service, _proto,	\
 				_domain, _text, _port)			\
+				DNS_SD_REGISTER_SERVICE_TO_IFACE(_id, NULL, _instance,	\
+						_proto, _domain, _text, _port)
+
+/**
+ * @brief Register a service for DNS Service Discovery to a specific interface
+ *
+ * The service can be referenced using the @p _id variable.
+ *
+ * @param _id variable name for the DNS-SD service record
+ * @param _ifname name of the interface on which the service is registered, such as "eth0"
+ * @param _instance name of the service instance such as "My HTTP Server"
+ * @param _service name of the service, such as "_http"
+ * @param _proto protocol used by the service - either "_tcp" or "_udp"
+ * @param _domain the domain of the service, such as "local"
+ * @param _text information for the DNS TXT record
+ * @param _port a pointer to the port number that this service will use
+ */
+#define DNS_SD_REGISTER_SERVICE_TO_IFACE(_id, _ifname, _instance, _service,	\
+		_proto, _domain, _text, _port)			\
 	static const STRUCT_SECTION_ITERABLE(dns_sd_rec, _id) = {	\
+		.ifname = _ifname,					\
 		.instance = _instance,					\
 		.service = _service,					\
 		.proto = _proto,					\
@@ -211,6 +231,8 @@ extern "C" {
  * @see <a href="https://tools.ietf.org/html/rfc6763">RFC 6763</a>
  */
 struct dns_sd_rec {
+	/** Name of the interface on which to register the service */
+	const char *ifname;
 	/** "<Instance>" - e.g. "My HTTP Server" */
 	const char *instance;
 	/** Top half of the "<Service>" such as "_http" */
