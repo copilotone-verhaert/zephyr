@@ -538,6 +538,15 @@ static void send_sd_response(int sock,
 			ext_rec_num--;
 		}
 
+		char ifname[CONFIG_NET_INTERFACE_NAME_LEN + 1];
+		net_if_get_name(iface, ifname, CONFIG_NET_INTERFACE_NAME_LEN);
+		const char *record_ifname = record->ifname;
+
+		if (record_ifname && strncmp(ifname, record_ifname,
+					CONFIG_NET_INTERFACE_NAME_LEN) != 0) {
+			continue; /* only handle requests that match the interface name  */
+		}
+
 		/* Checks validity and then compare */
 		if (dns_sd_rec_match(record, &filter)) {
 			NET_INFO("matched query: %s.%s.%s.%s port: %u",
