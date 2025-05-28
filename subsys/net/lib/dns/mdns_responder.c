@@ -661,6 +661,26 @@ static int dns_read(int sock,
 		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD)
 			&& qtype == DNS_RR_TYPE_PTR) {
 			send_sd_response(sock, family, src_addr, addrlen, result);
+		} else {
+			/* if no answer has been sent yet, iterate over the registered services,
+			 * which might have responed with an alias
+			 */
+			int dns_sd_rec_count = 0;
+			const struct dns_sd_rec *record;
+			DNS_SD_COUNT(&dns_sd_rec_count);
+			for (int i = 0; i<dns_sd_rec_count; ++i) {
+				DNS_SD_GET(i, &record);
+				if (record->alias) {
+					int alias_len = strlen(record->alias);
+					if (!strncasecmp(record->alias, result->data + 1, alias_len)) {
+						NET_DBG("%s %s %s to our alias %s%s", "mDNS",
+							family == AF_INET ? "IPv4" : "IPv6", "query",
+							record->alias, ".local");
+						send_response(sock, family, src_addr, addrlen,
+								  result, qtype);
+					}
+				}
+			}
 		}
 
 	} while (--queries);
