@@ -32,6 +32,8 @@ LOG_MODULE_REGISTER(net_mdns_responder, CONFIG_MDNS_RESPONDER_LOG_LEVEL);
 #include <zephyr/net/socket_service.h>
 #include <zephyr/net/igmp.h>
 
+#include <zephyr/posix/net/if.h>
+
 #include "dns_sd.h"
 #include "dns_pack.h"
 #include "ipv6.h"
@@ -106,18 +108,17 @@ static size_t external_records_count;
 #define BUF_ALLOC_TIMEOUT K_MSEC(100)
 
 #ifndef CONFIG_NET_TEST
-static int setup_dst_addr(int sock, net_sa_family_t family,
-			  struct net_sockaddr *src, net_socklen_t src_len,
-			  struct net_sockaddr *dst, net_socklen_t *dst_len);
+static int setup_dst_addr(int sock, sa_family_t family,
+			  struct sockaddr *dst, socklen_t *dst_len);
 #endif /* CONFIG_NET_TEST */
 
 #define DNS_RESOLVER_MIN_BUF		2
 #define DNS_RESOLVER_BUF_CTR	(DNS_RESOLVER_MIN_BUF + \
 				 CONFIG_MDNS_RESOLVER_ADDITIONAL_BUF_CTR)
 
-#define MDNS_RESOLVER_BUF_SIZE CONFIG_MDNS_RESOLVER_BUF_SIZE
+#define MDNS_RESOLVER_MAX_BUF_SIZE 1024
 NET_BUF_POOL_DEFINE(mdns_msg_pool, DNS_RESOLVER_BUF_CTR,
-		    MDNS_RESOLVER_BUF_SIZE, 0, NULL);
+		    MDNS_RESOLVER_MAX_BUF_SIZE, 0, NULL);
 
 static void create_ipv6_addr(struct net_sockaddr_in6 *addr)
 {
@@ -193,7 +194,6 @@ static int set_ttl_hop_limit(int sock, int level, int option, int new_limit)
 }
 
 int setup_dst_addr(int sock, net_sa_family_t family,
-		   struct net_sockaddr *src, net_socklen_t src_len,
 		   struct net_sockaddr *dst, net_socklen_t *dst_len)
 {
 	int ret;
@@ -382,8 +382,7 @@ static int send_response(int sock,
 			addr = net_if_ipv4_select_src_addr(iface, &tmp_addr.sin_addr);
 		}
 
-		ret = create_answer(sock, query, qtype, sizeof(struct net_in_addr),
-				    (uint8_t *)addr);
+		ret = create_answer(sock, query, qtype, sizeof(struct net_in_addr), (uint8_t *)addr);
 		if (ret != 0) {
 			return ret;
 		}
@@ -400,8 +399,7 @@ static int send_response(int sock,
 			addr = net_if_ipv6_select_src_addr(iface, &tmp_addr.sin6_addr);
 		}
 
-		ret = create_answer(sock, query, qtype, sizeof(struct net_in6_addr),
-				    (uint8_t *)addr);
+		ret = create_answer(sock, query, qtype, sizeof(struct net_in6_addr), (uint8_t *)addr);
 		if (ret != 0) {
 			return -ENOMEM;
 		}
@@ -506,6 +504,12 @@ static void send_sd_response(int sock,
 		}
 	}
 
+    char ifname[IF_NAMESIZE] = {};
+    if ( 0 >= net_if_get_name(iface, ifname, sizeof(ifname)))
+    {
+        NET_ERR("net_if_get_name(...) failed");
+    }
+
 	ret = dns_sd_query_extract(result->data, result->len, &filter, label, size, &n);
 	if (ret < 0) {
 		NET_DBG("unable to extract query (%d)", ret);
@@ -544,10 +548,17 @@ static void send_sd_response(int sock,
 
 		/* Checks validity and then compare */
 		if (dns_sd_rec_match(record, &filter)) {
-			NET_INFO("matched query: %s.%s.%s.%s port: %u",
+			NET_INFO("matched query: %s.%s.%s.%s port: %u via %s for %s on %s",
 				record->instance, record->service,
 				record->proto, record->domain,
-				net_ntohs(*(record->port)));
+				net_ntohs(*(record->port)),
+                ifname,
+                record->alias, record->iface);
+                
+            if (0 != strcmp(ifname, record->iface)) {
+                NET_DBG("skipped on this interface");
+                continue;
+            }
 
 			/* Construct the response */
 			if (service_type_enum) {
@@ -586,7 +597,8 @@ static int dns_read(int sock,
 		    struct net_buf *dns_data,
 		    size_t len,
 		    struct net_sockaddr *src_addr,
-		    size_t addrlen)
+		    size_t addrlen,
+		    unsigned int ifindex)
 {
 	/* Helper struct to track the dns msg received from the server */
 	const char *hostname = net_hostname_get();
@@ -597,6 +609,12 @@ static int dns_read(int sock,
 	int data_len;
 	int queries;
 	int ret;
+    char ifname[IF_NAMESIZE] = {};
+
+    if (NULL == if_indextoname(ifindex, ifname))
+    {
+        NET_ERR("if_indextoname(%i,...) failed", ifindex);
+    }
 
 	data_len = MIN(len, DNS_RESOLVER_MAX_BUF_SIZE);
 
@@ -619,15 +637,13 @@ static int dns_read(int sock,
 
 	queries = ret;
 
-	NET_DBG("Received %d %s from %s:%u", queries,
+	NET_DBG("Received %d %s from %s on interface '%s'", queries,
 		queries > 1 ? "queries" : "query",
 		net_sprint_addr(family,
 				family == NET_AF_INET ?
 				(const void *)&net_sin(src_addr)->sin_addr :
 				(const void *)&net_sin6(src_addr)->sin6_addr),
-				net_ntohs(family == NET_AF_INET ?
-				net_sin(src_addr)->sin_port :
-				net_sin6(src_addr)->sin6_port));
+				ifname);
 
 	do {
 		enum dns_rr_type qtype;
@@ -667,6 +683,26 @@ static int dns_read(int sock,
 		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD)
 			&& qtype == DNS_RR_TYPE_PTR) {
 			send_sd_response(sock, family, src_addr, addrlen, result);
+		} else {
+			/* if no answer has been sent yet, iterate over the registered services,
+			 * which might have responded with an alias
+			 */
+			int dns_sd_rec_count = 0;
+			const struct dns_sd_rec *record;
+			DNS_SD_COUNT(&dns_sd_rec_count);
+			for (int i = 0; i<dns_sd_rec_count; ++i) {
+				DNS_SD_GET(i, &record);
+				if (record->alias) {
+					int alias_len = strlen(record->alias);
+					if (!strncasecmp(record->alias, result->data + 1, alias_len)) {
+						NET_DBG("%s %s %s to our alias %s%s", "mDNS",
+							family == AF_INET ? "IPv4" : "IPv6", "query",
+							record->alias, ".local");
+						send_response(sock, family, src_addr, addrlen,
+								  result, qtype);
+					}
+				}
+			}
 		}
 
 	} while (--queries);
@@ -857,7 +893,7 @@ static int send_probe(struct mdns_responder_context *ctx)
 		create_ipv6_addr(&server);
 	}
 
-	servers[0] = (struct net_sockaddr *)&server;
+	servers[0] = (struct sockaddr *)&server;
 	interfaces[0] = net_if_get_by_iface(ctx->iface);
 
 	ret = dns_resolve_init_with_svc(&ctx->probe_ctx, NULL,
@@ -1147,7 +1183,7 @@ static void setup_ipv6_addr(struct net_sockaddr_in6 *local_addr)
 #if defined(CONFIG_NET_IPV4)
 static void iface_ipv4_cb(struct net_if *iface, void *user_data)
 {
-	struct ne_in_addr *addr = user_data;
+	struct net_in_addr *addr = user_data;
 	int ret;
 
 	if (!net_if_is_up(iface)) {
@@ -1192,7 +1228,7 @@ static int dispatcher_cb(struct dns_socket_dispatcher *ctx, int sock,
 {
 	int ret;
 
-	ret = dns_read(sock, dns_data, len, addr, addrlen);
+	ret = dns_read(sock, dns_data, len, addr, addrlen, ctx->ifindex);
 	if (ret < 0 && ret != -EINVAL && ret != -ENOENT) {
 		NET_DBG("%s read failed (%d)", "mDNS", ret);
 	}
@@ -1443,7 +1479,7 @@ static int init_listener(void)
 		if (v4 < 0) {
 			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d (%d)",
 				"IPv4", MAX_IPV4_IFACE_COUNT,
-				"IPv4", CONFIG_NET_MAX_CONTEXTS, v4);
+				"IPv4", CONFIG_NET_MAX_CONTEXTS);
 			continue;
 		}
 
