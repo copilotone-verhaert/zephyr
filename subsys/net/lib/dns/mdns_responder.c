@@ -132,7 +132,7 @@ static void create_ipv6_addr(struct net_sockaddr_in6 *addr)
 
 static void create_ipv4_addr(struct net_sockaddr_in *addr)
 {
-	addr->sin_family = NET_AF_INET;
+	addr->sin_family = AF_INET;
 	addr->sin_port = net_htons(MDNS_LISTEN_PORT);
 
 	/* Well known IPv4 224.0.0.251 address */
@@ -1383,7 +1383,7 @@ static int init_listener(void)
 		if (v6 < 0) {
 			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d (%d)",
 				"IPv6", MAX_IPV6_IFACE_COUNT,
-				"IPv6", CONFIG_NET_MAX_CONTEXTS, v6);
+				"IPv6", CONFIG_NET_MAX_CONTEXTS);
 			continue;
 		}
 
@@ -1477,7 +1477,7 @@ static int init_listener(void)
 
 		v4 = get_socket(NET_AF_INET);
 		if (v4 < 0) {
-			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d (%d)",
+			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d",
 				"IPv4", MAX_IPV4_IFACE_COUNT,
 				"IPv4", CONFIG_NET_MAX_CONTEXTS);
 			continue;
@@ -1625,7 +1625,7 @@ static struct net_buf *create_unsolicited_mdns_answer(struct net_if *iface,
 
 		if (addr_list[i].addr.family == NET_AF_INET) {
 			type = DNS_RR_TYPE_A;
-		} else if (addr_list[i].addr.family == NET_AF_INET6) {
+		} else if (addr_list[i].addr.family == AF_INET6) {
 			type = DNS_RR_TYPE_AAAA;
 		} else {
 			NET_DBG("Unknown family %d", addr_list[i].addr.family);
@@ -1646,7 +1646,7 @@ static struct net_buf *create_unsolicited_mdns_answer(struct net_if *iface,
 		    (answer_count > 0 &&
 		     left < (1 + 1 + 2 + 2 + 4 + 4 +
 			     (type == DNS_RR_TYPE_A ? sizeof(struct net_in_addr) :
-			      sizeof(struct net_in6_addr))))) {
+			      sizeof(struct in6_addr))))) {
 			NET_DBG("No more space (%u left)", left);
 			net_buf_unref(answer);
 			return NULL;
@@ -1675,7 +1675,7 @@ static struct net_buf *create_unsolicited_mdns_answer(struct net_if *iface,
 		} else if (type == DNS_RR_TYPE_AAAA) {
 			net_buf_add_be16(answer, sizeof(struct net_in6_addr));
 			net_buf_add_mem(answer, &addr_list[i].addr.in6_addr,
-				sizeof(struct net_in6_addr));
+				sizeof(struct in6_addr));
 		}
 
 		answer_count++;
