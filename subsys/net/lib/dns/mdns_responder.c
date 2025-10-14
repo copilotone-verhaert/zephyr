@@ -199,10 +199,6 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 	int ret;
 
 	if (IS_ENABLED(CONFIG_NET_IPV4) && family == NET_AF_INET) {
-		if ((src != NULL) && (net_sin(src)->sin_port != net_htons(MDNS_LISTEN_PORT))) {
-			memcpy(dst, src, src_len);
-			*dst_len = src_len;
-		} else {
 			create_ipv4_addr(net_sin(dst));
 			*dst_len = sizeof(struct net_sockaddr_in);
 
@@ -212,10 +208,6 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 			}
 		}
 	} else if (IS_ENABLED(CONFIG_NET_IPV6) && family == NET_AF_INET6) {
-		if ((src != NULL) && (net_sin6(src)->sin6_port != net_htons(MDNS_LISTEN_PORT))) {
-			memcpy(dst, src, src_len);
-			*dst_len = src_len;
-		} else {
 			create_ipv6_addr(net_sin6(dst));
 			*dst_len = sizeof(struct net_sockaddr_in6);
 
