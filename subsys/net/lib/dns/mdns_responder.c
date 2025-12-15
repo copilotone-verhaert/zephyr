@@ -175,6 +175,13 @@ static void mdns_iface_event_handler(struct net_mgmt_event_callback *cb,
 					net_if_get_by_iface(iface), ret);
 			}
 		}
+	}
+	else
+	{
+			NET_DBG("Joined IPv4 multicast %d address %s to iface %d", net_if_get_by_iface(iface),
+				net_sprint_ipv4_addr(&net_sin(
+				&v4_ctx[net_if_get_by_iface(iface)-1].dispatcher.local_addr)->sin_addr),
+				net_if_get_by_iface(iface)-1);
 #endif /* defined(CONFIG_NET_IPV4) */
 	}
 
@@ -206,7 +213,6 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 			if (ret < 0) {
 				NET_DBG("Cannot set %s multicast %s (%d)", "IPv4", "TTL", ret);
 			}
-		}
 	} else if (IS_ENABLED(CONFIG_NET_IPV6) && family == NET_AF_INET6) {
 			create_ipv6_addr(net_sin6(dst));
 			*dst_len = sizeof(struct net_sockaddr_in6);
@@ -216,11 +222,9 @@ int setup_dst_addr(int sock, net_sa_family_t family,
 			if (ret < 0) {
 				NET_DBG("Cannot set %s multicast %s (%d)", "IPv6", "hoplimit", ret);
 			}
-		}
 	} else {
 		return -EPFNOSUPPORT;
 	}
-
 	return 0;
 }
 
@@ -341,9 +345,10 @@ static int send_response(int sock,
 			 struct sockaddr *src_addr,
 			 size_t addrlen,
 			 struct net_buf *query,
-			 enum dns_rr_type qtype)
+			 enum dns_rr_type qtype,
+			 struct net_if * iface
+			)
 {
-	struct net_if *iface;
 	socklen_t dst_len;
 	int ret;
 	COND_CODE_1(IS_ENABLED(CONFIG_NET_IPV6),
@@ -353,12 +358,6 @@ static int send_response(int sock,
 	if (ret < 0) {
 		NET_DBG("unable to set up the response address");
 		return ret;
-	}
-
-	if (family == NET_AF_INET6) {
-		iface = net_if_ipv6_select_src_iface(&net_sin6(src_addr)->sin6_addr);
-	} else {
-		iface = net_if_ipv4_select_src_iface(&net_sin(src_addr)->sin_addr);
 	}
 
 	if (IS_ENABLED(CONFIG_NET_IPV4) && qtype == DNS_RR_TYPE_A) {
@@ -416,9 +415,10 @@ static void send_sd_response(int sock,
 			     net_sa_family_t family,
 			     struct net_sockaddr *src_addr,
 			     size_t addrlen,
-			     struct net_buf *result)
+			     struct net_buf *result,
+				 struct net_if * iface
+				)
 {
-	struct net_if *iface;
 	net_socklen_t dst_len;
 	int ret;
 	const struct dns_sd_rec *record;
@@ -462,12 +462,6 @@ static void send_sd_response(int sock,
 	if (ret < 0) {
 		NET_DBG("unable to set up the response address");
 		return;
-	}
-
-	if (family == NET_AF_INET6) {
-		iface = net_if_ipv6_select_src_iface(&net_sin6(src_addr)->sin6_addr);
-	} else {
-		iface = net_if_ipv4_select_src_iface(&net_sin(src_addr)->sin_addr);
 	}
 
 	if (IS_ENABLED(CONFIG_NET_IPV4)) {
@@ -546,7 +540,7 @@ static void send_sd_response(int sock,
 				net_ntohs(*(record->port)),
                 ifname,
                 record->alias, record->iface);
-                
+
             if (0 != strcmp(ifname, record->iface)) {
                 NET_DBG("skipped on this interface");
                 continue;
@@ -688,7 +682,7 @@ static int dns_read(int sock,
 							family == AF_INET ? "IPv4" : "IPv6", "query",
 							record->alias, ".local");
 						send_response(sock, family, src_addr, addrlen,
-							result, qtype);
+							result, qtype, net_if_get_by_index(ifindex));
 						response_sent = 1;
 					}
 				}
@@ -705,10 +699,11 @@ static int dns_read(int sock,
 				family == NET_AF_INET ? "IPv4" : "IPv6", "query",
 				hostname, ".local");
 			send_response(sock, family, src_addr, addrlen,
-				      result, qtype);
+				      result, qtype, net_if_get_by_index(ifindex));
 		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD)
 			&& qtype == DNS_RR_TYPE_PTR) {
-			send_sd_response(sock, family, src_addr, addrlen, result);
+
+			send_sd_response(sock, family, src_addr, addrlen, result, net_if_get_by_index(ifindex));
 		}
 
 	} while (--queries);
@@ -1387,7 +1382,7 @@ static int init_listener(void)
 
 		v6 = get_socket(NET_AF_INET6);
 		if (v6 < 0) {
-			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d (%d)",
+			NET_ERR("Cannot get %s socket (%d %s interfaces). Max sockets is %d",
 				"IPv6", MAX_IPV6_IFACE_COUNT,
 				"IPv6", CONFIG_NET_MAX_CONTEXTS);
 			continue;
@@ -1503,8 +1498,8 @@ static int init_listener(void)
 				ifindex, ret);
 		} else {
 			memset(&if_req, 0, sizeof(if_req));
-			strncpy(if_req.ifr_name, name, sizeof(if_req.ifr_name) - 1);
-
+			memcpy(if_req.ifr_name, name,
+			       MIN(sizeof(name) - 1, sizeof(if_req.ifr_name) - 1));
 			ret = zsock_setsockopt(v4, ZSOCK_SOL_SOCKET, ZSOCK_SO_BINDTODEVICE,
 					       &if_req, sizeof(if_req));
 			if (ret < 0) {
