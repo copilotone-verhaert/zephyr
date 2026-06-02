@@ -197,8 +197,15 @@ static int mcux_flexcomm_transfer(const struct device *dev,
 			break;
 		}
 
-		/* Wait for the transfer to complete */
-		k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT_MSEC);
+		/* Wait for the transfer to complete. If the IRQ never fires (e.g. slave
+		 * holds SCL low), the sem times out; return -ETIMEDOUT instead
+		 * of silently advancing to the next message with stale callback_status.
+		 */
+		if (k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT_MSEC) != 0) {
+			I2C_MasterTransferAbort(base, &data->handle);
+			ret = -ETIMEDOUT;
+			break;
+		}
 
 		/* Return an error if the transfer didn't complete
 		 * successfully. e.g., nak, timeout, lost arbitration
@@ -598,6 +605,14 @@ static int mcux_flexcomm_init_common(const struct device *dev)
 	}
 
 	I2C_MasterGetDefaultConfig(&master_config);
+	/* Enable the HW SCL/event timeout so a blocked peripheral cannot trap
+	 * I2C_PendingStatusWait in an infinite poll.
+	 * 25 ms is far longer than any legitimate byte time at 100/400 kHz,
+	 * but well below CONFIG_I2C_NXP_TRANSFER_TIMEOUT.
+	 */
+	master_config.enableTimeout = true;
+	master_config.timeout_Ms = 25;
+
 	I2C_MasterInit(base, &master_config, clock_freq);
 	I2C_MasterTransferCreateHandle(base, &data->handle,
 				       mcux_flexcomm_master_transfer_callback,
