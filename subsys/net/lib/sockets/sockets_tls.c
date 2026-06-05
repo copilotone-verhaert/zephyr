@@ -198,6 +198,8 @@ __net_socket struct tls_context {
 		/** Socket RX timeout */
 		k_timeout_t timeout_rx;
 
+		size_t directional_buf_size;
+
 #if defined(CONFIG_NET_SOCKETS_ENABLE_DTLS)
 		/* DTLS handshake timeout */
 		uint32_t dtls_handshake_timeout_min;
@@ -1425,6 +1427,11 @@ static int tls_mbedtls_init(struct tls_context *context, bool is_server)
 	}
 #endif
 
+	if(context->options.directional_buf_size != 0) {
+		mbedtls_ssl_conf_directional_buf_size(&context->config,
+						                      context->options.directional_buf_size);
+	}
+
 #if defined(MBEDTLS_SSL_EARLY_DATA)
 	mbedtls_ssl_conf_early_data(&context->config, MBEDTLS_SSL_EARLY_DATA_ENABLED);
 #endif
@@ -2250,6 +2257,25 @@ static int tls_opt_cert_verify_callback_set(struct tls_context *context,
 	return -ENOPROTOOPT;
 }
 #endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
+
+static int tls_opt_directional_buf_size_set(struct tls_context *context,
+					    const void *optval,
+					    socklen_t optlen)
+{
+	int *val = (int *)optval;
+
+	if (!optval) {
+		return -EINVAL;
+	}
+
+	if (sizeof(int) != optlen) {
+		return -EINVAL;
+	}
+
+	context->options.directional_buf_size = *val;;
+
+	return 0;
+}
 
 static int protocol_check(int family, int type, int *proto)
 {
@@ -3840,6 +3866,10 @@ int ztls_setsockopt_ctx(struct tls_context *ctx, int level, int optname,
 
 	case TLS_CERT_VERIFY_CALLBACK:
 		err = tls_opt_cert_verify_callback_set(ctx, optval, optlen);
+		break;
+
+	case TLS_CUSTOM_DIR_BUF_SIZE:
+		err = tls_opt_directional_buf_size_set(ctx, optval, optlen);
 		break;
 
 #if defined(CONFIG_NET_SOCKETS_ENABLE_DTLS)
