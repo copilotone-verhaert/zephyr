@@ -262,6 +262,17 @@ extern "C" {
  */
 #define TLS_CERT_VERIFY_CALLBACK 20
 
+/** Write-only socket option to configure a custom buffer size for TLS in and out buffers.
+ *  Normally, this value is configured with CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN.
+ *  However, if not all TLS sessions should use the same buffer size, this option can be used.
+ *
+ *  This change requires custom MBEDTLS patches.
+ *
+ *  The internal buffers are slightly larger than the values configured with this option.
+ *  Typically, an increase of ~330 bytes is expected.
+ */
+#define TLS_CUSTOM_DIR_BUF_SIZE 21
+
 /* Valid values for @ref TLS_PEER_VERIFY option */
 #define TLS_PEER_VERIFY_NONE 0     /**< Peer verification disabled. */
 #define TLS_PEER_VERIFY_OPTIONAL 1 /**< Peer verification optional. */
