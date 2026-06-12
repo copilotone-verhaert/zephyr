@@ -1168,10 +1168,7 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 			NET_DBG("domain '%s' is invalid", record->domain);
 			return -EINVAL;
 		}
-	} else if (qlabels > DNS_SD_MIN_LABELS && qlabels < DNS_SD_MAX_LABELS) {
-		NET_DBG("unsupported number of labels %zu", qlabels);
-		return -EINVAL;
-	} else if (qlabels == DNS_SD_MAX_LABELS) {
+	} else if (qlabels == 4) {
 		/* e.g.
 		 * "Zephyr 42"._zephyr._tcp.local, or
 		 * _domains._dns-sd._udp.local
@@ -1200,7 +1197,7 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 			NET_DBG("domain '%s' is invalid", record->domain);
 			return -EINVAL;
 		}
-	} else if (qlabels == 5) {
+	} else if (qlabels == DNS_SD_MAX_LABELS) {
 		/* RFC 6763 ch. 7.1 subtype query:
 		 * <sub>._sub.<service>._<proto>.<domain>
 		 * e.g. _universal._sub._ipp._tcp.local

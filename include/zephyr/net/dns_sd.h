@@ -81,7 +81,7 @@ extern "C" {
  * ```
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc6763">RFC 6763</a>, Section 7.2.
  */
-#define DNS_SD_MAX_LABELS 4
+#define DNS_SD_MAX_LABELS 5
 
 /**
  * @brief Register a service for DNS Service Discovery
