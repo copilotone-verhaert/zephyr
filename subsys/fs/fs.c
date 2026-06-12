@@ -523,7 +523,7 @@ int fs_mkdir(const char *abs_path)
 
 	rc = mp->fs->mkdir(mp, abs_path);
 	if (rc < 0) {
-		LOG_ERR("failed to create directory (%d)", rc);
+		LOG_ERR("failed to create directory %s (%d)", abs_path, rc);
 	}
 
 	return rc;

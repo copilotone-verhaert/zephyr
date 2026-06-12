@@ -443,12 +443,17 @@ static void send_sd_response(int sock,
 	 */
 	char proto_buf[DNS_SD_DOMAIN_MAX_SIZE + 1];
 	char domain_buf[DNS_SD_DOMAIN_MAX_SIZE + 1];
-	char *label[4];
+	/* Extra buffer for the 5-label subtype form:
+	 * <sub>._sub.<service>._<proto>.<domain> (RFC 6763 ch. 7.1)
+	 */
+	char sub_buf[DNS_SD_DOMAIN_MAX_SIZE + 1];
+	char *label[5];
 	size_t size[] = {
 		ARRAY_SIZE(instance_buf),
 		ARRAY_SIZE(service_buf),
 		ARRAY_SIZE(proto_buf),
 		ARRAY_SIZE(domain_buf),
+		ARRAY_SIZE(sub_buf),
 	};
 	size_t n = ARRAY_SIZE(label);
 	size_t rec_num;
@@ -466,6 +471,7 @@ static void send_sd_response(int sock,
 	label[1] = service_buf;
 	label[2] = proto_buf;
 	label[3] = domain_buf;
+	label[4] = sub_buf;
 
 	ret = setup_dst_addr(sock, family, src_addr, addrlen, (struct sockaddr *)&dst, &dst_len);
 	if (ret < 0) {
@@ -676,10 +682,11 @@ static int dns_read(int sock,
 		{
 			char needle[128] = {};
 			char * end = &result->data[ret];
-			char * rd = &result->data[1];
+			char * rd = &result->data[0];
 			char * wr = &needle[0];
 
-			for ( ; (rd < end) && (*rd != '.'); *wr = *rd, ++rd, ++wr );
+			for ( ; (rd < end) && (*rd != '.') && (wr < &needle[sizeof(needle) - 1]);
+			      *wr = *rd, ++rd, ++wr );
 			int dns_sd_rec_count = 0;
 			int response_sent = 0;
 			const struct dns_sd_rec *record;
@@ -703,7 +710,7 @@ static int dns_read(int sock,
 				continue;
 			}
 		}
-
+		
 		if (!strncasecmp(hostname, result->data, hostname_len) &&
 		    (result->len) >= hostname_len &&
 		    &result->data[hostname_len] == lquery) {
@@ -726,12 +733,14 @@ static int dns_read(int sock,
 				DNS_SD_GET(i, &record);
 				if (record->alias && record->iface) {
 					int alias_len = strlen(record->alias);
-					if (!strncasecmp(record->alias, result->data + 1, alias_len)) {
+					if (!strncasecmp(record->alias, (const char *)result->data, alias_len) &&
+					    result->len > alias_len &&
+					    result->data[alias_len] == '.') {
 						NET_DBG("%s %s %s to our alias %s%s", "mDNS",
 							family == AF_INET ? "IPv4" : "IPv6", "query",
 							record->alias, ".local");
 						send_response(sock, family, src_addr, addrlen,
-								  result, qtype, net_if_get_by_index(ifindex));
+							      result, qtype, net_if_get_by_index(ifindex));
 					}
 				}
 			}

@@ -1168,10 +1168,7 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 			NET_DBG("domain '%s' is invalid", record->domain);
 			return -EINVAL;
 		}
-	} else if (qlabels > DNS_SD_MIN_LABELS && qlabels < DNS_SD_MAX_LABELS) {
-		NET_DBG("unsupported number of labels %zu", qlabels);
-		return -EINVAL;
-	} else if (qlabels >= DNS_SD_MAX_LABELS) {
+	} else if (qlabels == 4) {
 		/* e.g.
 		 * "Zephyr 42"._zephyr._tcp.local, or
 		 * _domains._dns-sd._udp.local
@@ -1200,6 +1197,41 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 			NET_DBG("domain '%s' is invalid", record->domain);
 			return -EINVAL;
 		}
+	} else if (qlabels == DNS_SD_MAX_LABELS) {
+		/* RFC 6763 ch. 7.1 subtype query:
+		 * <sub>._sub.<service>._<proto>.<domain>
+		 * e.g. _universal._sub._ipp._tcp.local
+		 *
+		 * Match as a wildcard against records that share the same
+		 * service/proto/domain; the subtype label itself is not part
+		 * of the dns_sd_rec model, so we ignore label[0].
+		 */
+		if (strcasecmp(label[1], "_sub") != 0) {
+			NET_DBG("expected '_sub' at label[1], got '%s'", label[1]);
+			return -EINVAL;
+		}
+
+		record->service = label[2];
+		record->proto   = label[3];
+		record->domain  = label[4];
+
+		if (!service_is_valid(record->service)) {
+			NET_DBG("service '%s' is invalid", record->service);
+			return -EINVAL;
+		}
+
+		if (!proto_is_valid(record->proto)) {
+			NET_DBG("proto '%s' is invalid", record->proto);
+			return -EINVAL;
+		}
+
+		if (!domain_is_valid(record->domain)) {
+			NET_DBG("domain '%s' is invalid", record->domain);
+			return -EINVAL;
+		}
+	} else {
+		NET_DBG("unsupported number of labels %zu", qlabels);
+		return -EINVAL;
 	}
 
 	return offset;
