@@ -52,6 +52,16 @@ static bool task_wdt_initialized;
 static const struct device *hw_wdt_dev;
 static int hw_wdt_channel;
 static bool hw_wdt_started;
+
+/* Pre-reset HW watchdog warning hook. Applications may override this weak
+ * symbol to perform last-millisecond actions (e.g. issue a JEDEC reset to an
+ * XIP NOR flash) before the HW watchdog resets the SoC. Runs in ISR context.
+ */
+__weak void task_wdt_hw_warning_handler(const struct device *dev, int channel_id)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(channel_id);
+}
 #endif
 
 static void schedule_next_timeout(int64_t current_ticks)
@@ -136,7 +146,7 @@ int task_wdt_init(const struct device *hw_wdt)
 		wdt_config.window.min = 0U;
 		wdt_config.window.max = CONFIG_TASK_WDT_MIN_TIMEOUT +
 			CONFIG_TASK_WDT_HW_FALLBACK_DELAY;
-		wdt_config.callback = NULL;
+		wdt_config.callback = task_wdt_hw_warning_handler;
 
 		hw_wdt_dev = hw_wdt;
 		hw_wdt_channel = wdt_install_timeout(hw_wdt_dev, &wdt_config);
