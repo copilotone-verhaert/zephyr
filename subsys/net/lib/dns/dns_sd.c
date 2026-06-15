@@ -134,10 +134,6 @@ bool label_is_valid(const char *label, size_t label_size)
 			if ('-' == label[i]) {
 				continue;
 			}
-			// TEMPORARY for _universal._sub._ipp service
-			if ('.' == label[i] || '_' == label[i]) {
-				continue;
-			}
 		}
 
 		NET_DBG("label '%s' contains illegal byte 0x%02x", label, label[i]);
@@ -362,9 +358,9 @@ int add_ptr_record(const struct dns_sd_rec *inst, uint32_t ttl,
 	uint16_t dom_offs;
 	size_t label_size;
 	uint16_t sp_size;
+	uint16_t sub_prefix_size = 0;
 	uint16_t offset = buf_offset;
 	const char *labels[] = {
-		inst->instance,
 		inst->service,
 		inst->proto,
 		inst->domain,
@@ -376,6 +372,16 @@ int add_ptr_record(const struct dns_sd_rec *inst, uint32_t ttl,
 	}
 
 	sp_size = service_proto_size(inst);
+
+	/* RFC 6763 ch. 7.1: subtype PTR has the form
+	 * <sub>._sub.<service>._<proto>.<domain>
+	 * The RDATA still points at <instance>.<service>._<proto>.<domain>
+	 * (no subtype), so message compression can target svc_offs.
+	 */
+	if (inst->subtype != NULL) {
+		sub_prefix_size = DNS_LABEL_LEN_SIZE + strlen(inst->subtype)
+				+ DNS_LABEL_LEN_SIZE + 4 /* "_sub" */;
+	}
 
 	/*
 	 * Next, calculate that there is enough space in the buffer.
@@ -391,8 +397,8 @@ int add_ptr_record(const struct dns_sd_rec *inst, uint32_t ttl,
 	 * RFC 1035, Section 4.1.4.
 	 */
 	name_size =
-		/* uncompressed. e.g. "._foo._tcp.local." */
-		sp_size +
+		/* uncompressed. e.g. "._sub._foo._tcp.local." */
+		sub_prefix_size + sp_size +
 		sizeof(*rr)
 		/* compressed e.g. .My Foo" followed by (DNS_SD_PTR_MASK | 0x0abc) */
 		+ 1 + strlen(inst->instance) + 2;
@@ -403,21 +409,21 @@ int add_ptr_record(const struct dns_sd_rec *inst, uint32_t ttl,
 		return -ENOSPC;
 	}
 
-	svc_offs = offset;
+	svc_offs = offset + sub_prefix_size;
 	if ((svc_offs & DNS_SD_PTR_MASK) != 0) {
 		NET_DBG("offset %u too big for message compression",
 			svc_offs);
 		return -E2BIG;
 	}
 
-	inst_offs = offset + sp_size + sizeof(*rr);
+	inst_offs = offset + sub_prefix_size + sp_size + sizeof(*rr);
 	if ((inst_offs & DNS_SD_PTR_MASK) != 0) {
 		NET_DBG("offset %u too big for message compression",
 			inst_offs);
 		return -E2BIG;
 	}
 
-	dom_offs = offset + sp_size - 1 -
+	dom_offs = offset + sub_prefix_size + sp_size - 1 -
 		   strlen(inst->domain) - 1;
 
 	/* Finally, write output with confidence that doing so is safe */
@@ -426,32 +432,27 @@ int add_ptr_record(const struct dns_sd_rec *inst, uint32_t ttl,
 	*instance_offset = inst_offs;
 	*domain_offset = dom_offs;
 
-	/* copy the service name. e.g. "._foo._tcp.local." */
-	for (i = 1; i < ARRAY_SIZE(labels); ++i) {
-		/* Hardcoded for Airprint. Only works for IPP, not IPPS! */
-		if (i == 1 && strcmp(labels[i], "_universal._sub._ipp") == 0) {
-			/* This is absolutely not safe, since memory size is checked above but does not take into account these longer responses.
-			But in practice, since PTR is the first record, there should be sufficient memory. */
-			int bytes_written = sprintf(&buf[offset], "%c%s%c%s%c%s", 10, "_universal", 4, "_sub", 4, "_ipp");
-			// TODO: IPPS?
-			offset += bytes_written;
-			/* service offset is updated to point to _ipp instead of to _universal._sub._ipp.
-			Reason: the reported service should always be the main type, not the subtype. */
-			svc_offs += 16;
-			*service_offset = svc_offs;
-		} else {
-			label_size = strlen(labels[i]);
-			buf[offset++] = strlen(labels[i]);
-			memcpy(&buf[offset], labels[i], label_size);
-			offset += label_size;
-			if (i == ARRAY_SIZE(labels) - 1) {
-				/* terminator */
-				buf[offset++] = '\0';
-			}
-		}
+	/* Optional subtype prefix: <sub>._sub */
+	if (inst->subtype != NULL) {
+		label_size = strlen(inst->subtype);
+		buf[offset++] = (uint8_t)label_size;
+		memcpy(&buf[offset], inst->subtype, label_size);
+		offset += label_size;
+		buf[offset++] = 4;
+		memcpy(&buf[offset], "_sub", 4);
+		offset += 4;
 	}
 
-	/* This assert no longer holds due to the airprint changes in the code above */
+	/* copy the service name. e.g. "._foo._tcp.local." */
+	for (i = 0; i < ARRAY_SIZE(labels); ++i) {
+		label_size = strlen(labels[i]);
+		buf[offset++] = (uint8_t)label_size;
+		memcpy(&buf[offset], labels[i], label_size);
+		offset += label_size;
+	}
+	/* terminator */
+	buf[offset++] = '\0';
+
 	__ASSERT_NO_MSG(svc_offs + sp_size == offset);
 
 	rr = (struct dns_rr *)&buf[offset];
@@ -807,17 +808,6 @@ int dns_sd_handle_ptr_query(const struct dns_sd_rec *inst, const struct in_addr 
 	rsp->ancount++;
 	offset += r;
 
-	if (strcmp(inst->service, "_universal._sub._ipp") == 0) {
-		/* Airprint specific change:
-		 	If the service subtype is reported (PTR), the main service also needs to be reported in an additional PTR record.
-			This can be done by actually copying the first PTR record excluding the first "._universal._sub" (16 bytes on the wire).
-			This memcpy is safe since it does not involve overlapping regions. */
-		uint16_t new_ptr_record_size = offset - sizeof(struct dns_header) - 16;
-		memcpy(&buf[offset], &buf[sizeof(struct dns_header)] + 16, new_ptr_record_size);
-		offset += new_ptr_record_size;
-		rsp->ancount++;
-	}
-
 	/* then add the additional records */
 	r = add_txt_record(inst, DNS_SD_TXT_TTL, instance_offset, buf, offset, buf_size);
 	if (r < 0) {
@@ -1018,6 +1008,23 @@ bool dns_sd_rec_match(const struct dns_sd_rec *record,
 		}
 	}
 
+	/* RFC 6763 ch. 7.1 subtype filtering.
+	 * A subtype query (filter->subtype != NULL) matches only records
+	 * that carry the same subtype. A base service query (filter->subtype
+	 * == NULL) matches only records without a subtype, so that the same
+	 * instance registered under both forms does not produce duplicate
+	 * answers.
+	 */
+	if (filter->subtype != NULL) {
+		if (record->subtype == NULL ||
+		    strncasecmp(record->subtype, filter->subtype,
+				DNS_LABEL_MAX_SIZE) != 0) {
+			return false;
+		}
+	} else if (record->subtype != NULL) {
+		return false;
+	}
+
 	/* check for the "wildcard" port */
 	if (filter->port != NULL && *(filter->port) != 0) {
 		if (*(record->port) != *(filter->port)) {
@@ -1062,31 +1069,8 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 	/* valid record must have non-NULL port */
 	record->port = &dns_sd_port_zero;
 
-    if (query[0] == '.') {
-        query++;
-    }
-
-	// Hardcoded code to split this query into its parts
-	if(strcmp(query, "_universal._sub._ipp._tcp.local") == 0) {
-		qsize = 20;
-		memcpy(label[0], query, qsize);
-		label[0][qsize] = 0;
-		size[0] = qsize;
-
-		qsize = 4;
-		memcpy(label[1], &query[21], qsize);
-		label[1][qsize] = 0;
-		size[1] = qsize;
-
-		qsize = 5;
-		memcpy(label[2], &query[26], qsize);
-		label[2][qsize] = 0;
-		size[2] = qsize;
-
-		record->service = label[0];
-		record->proto = label[1];
-		record->domain = label[2];
-		return 31;
+	if (query[0] == '.') {
+		query++;
 	}
 
 	/* also counts labels */
@@ -1201,19 +1185,21 @@ int dns_sd_query_extract(const uint8_t *query, size_t query_size, struct dns_sd_
 		/* RFC 6763 ch. 7.1 subtype query:
 		 * <sub>._sub.<service>._<proto>.<domain>
 		 * e.g. _universal._sub._ipp._tcp.local
-		 *
-		 * Match as a wildcard against records that share the same
-		 * service/proto/domain; the subtype label itself is not part
-		 * of the dns_sd_rec model, so we ignore label[0].
 		 */
 		if (strcasecmp(label[1], "_sub") != 0) {
 			NET_DBG("expected '_sub' at label[1], got '%s'", label[1]);
 			return -EINVAL;
 		}
 
+		record->subtype = label[0];
 		record->service = label[2];
 		record->proto   = label[3];
 		record->domain  = label[4];
+
+		if (!service_is_valid(record->subtype)) {
+			NET_DBG("subtype '%s' is invalid", record->subtype);
+			return -EINVAL;
+		}
 
 		if (!service_is_valid(record->service)) {
 			NET_DBG("service '%s' is invalid", record->service);

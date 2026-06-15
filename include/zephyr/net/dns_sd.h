@@ -106,9 +106,13 @@ extern "C" {
  * @param _domain the domain of the service, such as "local"
  * @param _text information for the DNS TXT record
  * @param _port a pointer to the port number that this service will use
+ * @param _alias optional alias hostname (or NULL) to advertise instead of net_hostname_get()
+ * @param _iface optional interface name (or NULL) on which to advertise this service
+ * @param _subtype optional DNS-SD subtype (RFC 6763 ch. 7.1), e.g. "_universal", or NULL
  */
 #define DNS_SD_REGISTER_SERVICE(_id, _instance, _service, _proto,	\
-				_domain, _text, _port, _alias, _iface)			\
+				_domain, _text, _port, _alias, _iface,	\
+				_subtype)				\
 	static const STRUCT_SECTION_ITERABLE(dns_sd_rec, _id) = {	\
 		.instance = _instance,					\
 		.service = _service,					\
@@ -117,8 +121,9 @@ extern "C" {
 		.text = (const char *)_text,				\
 		.text_size = sizeof(_text) - 1,				\
 		.port = _port,						\
-        .alias = _alias,                    \
-		.iface = _iface,						\
+		.alias = _alias,					\
+		.iface = _iface,					\
+		.subtype = _subtype,					\
 	}
 
 /**
@@ -162,7 +167,7 @@ extern "C" {
 				    port)				 \
 	static const uint16_t id ## _port = sys_cpu_to_be16(port); \
 	DNS_SD_REGISTER_SERVICE(id, instance, service, "_tcp", domain,	 \
-				text, &id ## _port)
+				text, &id ## _port, NULL, NULL, NULL)
 
 /**
  * @brief Register a UDP service for DNS Service Discovery
@@ -191,7 +196,7 @@ extern "C" {
 				    port)				 \
 	static const uint16_t id ## _port = sys_cpu_to_be16(port); \
 	DNS_SD_REGISTER_SERVICE(id, instance, service, "_udp", domain,	 \
-				text, &id ## _port)
+				text, &id ## _port, NULL, NULL, NULL)
 
 /** Empty DNS-SD TXT specifier */
 #define DNS_SD_EMPTY_TXT dns_sd_empty_txt
@@ -231,6 +236,10 @@ struct dns_sd_rec {
 	const char *alias;
 	/** <iface> for this record */
 	const char *iface;
+	/** Optional DNS-SD subtype (RFC 6763 ch. 7.1), e.g. "_universal".
+	 *  NULL when the record represents a base service.
+	 */
+	const char *subtype;
 };
 
 /** @cond INTERNAL_HIDDEN */
