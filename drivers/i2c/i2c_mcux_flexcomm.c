@@ -184,6 +184,14 @@ static int mcux_flexcomm_transfer(const struct device *dev,
 		transfer.data = msgs->buf;
 		transfer.dataSize = msgs->len;
 
+		/* Drop any stale completion token from a previous transfer
+		 * whose callback fired after we had already timed out, and
+		 * arm callback_status with a sentinel so a missed callback
+		 * cannot be misread as success.
+		 */
+		k_sem_reset(&data->device_sync_sem);
+		data->callback_status = kStatus_I2C_Busy;
+
 		/* Start the transfer */
 		status = I2C_MasterTransferNonBlocking(base,
 				&data->handle, &transfer);
@@ -192,20 +200,57 @@ static int mcux_flexcomm_transfer(const struct device *dev,
 		 * e.g., if the bus was busy
 		 */
 		if (status != kStatus_Success) {
+			LOG_WRN("I2C transfer start failed (status=%d, msg %d/%d, addr 0x%02x, %s %u bytes)",
+				status, i + 1, num_msgs, addr,
+				(msgs->flags & I2C_MSG_READ) ? "R" : "W", msgs->len);
 			I2C_MasterTransferAbort(base, &data->handle);
-			ret = -EIO;
+			ret = (status == kStatus_I2C_Busy) ? -EBUSY : -EIO;
 			break;
 		}
 
-		/* Wait for the transfer to complete */
-		k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT_MSEC);
+		/* Wait for the transfer to complete. The SDK ISR/callback is
+		 * what signals the sem; if the bus is wedged (e.g. SCL held
+		 * low, slave clock-stretching forever) the callback never
+		 * fires and k_sem_take returns -EAGAIN. Treat that as a hard
+		 * timeout so the caller actually sees the failure instead of
+		 * inheriting a stale callback_status.
+		 */
+		ret = k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT_MSEC);
+		if (ret != 0) {
+			LOG_ERR("I2C transfer wait timed out (msg %d/%d, addr 0x%02x, %s %u bytes)",
+				i + 1, num_msgs, addr,
+				(msgs->flags & I2C_MSG_READ) ? "R" : "W", msgs->len);
+			I2C_MasterTransferAbort(base, &data->handle);
+			ret = -ETIMEDOUT;
+			break;
+		}
 
 		/* Return an error if the transfer didn't complete
 		 * successfully. e.g., nak, timeout, lost arbitration
 		 */
 		if (data->callback_status != kStatus_Success) {
+			LOG_WRN("I2C transfer failed (status=%d, msg %d/%d, addr 0x%02x, %s %u bytes)",
+				data->callback_status, i + 1, num_msgs, addr,
+				(msgs->flags & I2C_MSG_READ) ? "R" : "W", msgs->len);
 			I2C_MasterTransferAbort(base, &data->handle);
-			ret = -EIO;
+			switch (data->callback_status) {
+			case kStatus_I2C_Nak:
+			case kStatus_I2C_Addr_Nak:
+				ret = -ENXIO;
+				break;
+			case kStatus_I2C_Timeout:
+				ret = -ETIMEDOUT;
+				break;
+			case kStatus_I2C_ArbitrationLost:
+				ret = -EAGAIN;
+				break;
+			case kStatus_I2C_Busy:
+				ret = -EBUSY;
+				break;
+			default:
+				ret = -EIO;
+				break;
+			}
 			break;
 		}
 
