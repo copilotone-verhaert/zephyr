@@ -24,7 +24,7 @@ if(CONFIG_WIFI_NM)
 zephyr_iterable_section(NAME wifi_nm_instance GROUP DATA_REGION ${XIP_ALIGN_WITH_INPUT})
 endif()
 
-if(CONFIG_WIFI_NM_WPA_SUPPLICANT_CRYPTO_ENTERPRISE AND CONFIG_NET_L2_WIFI_SHELL)
+if(CONFIG_WIFI_CERTIFICATE_LIB AND NOT CONFIG_WIFI_SHELL_RUNTIME_CERTIFICATES)
   # Wi-Fi Enterprise test certificates handling
   set(gen_inc_dir ${ZEPHYR_BINARY_DIR}/misc/generated)
   set(gen_dir ${gen_inc_dir}/wifi_enterprise_test_certs)
