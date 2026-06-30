@@ -1427,10 +1427,12 @@ static int tls_mbedtls_init(struct tls_context *context, bool is_server)
 	}
 #endif
 
+#if defined(MBEDTLS_SSL_CUSTOM_BUFFER_LENGTH)
 	if(context->options.directional_buf_size != 0) {
 		mbedtls_ssl_conf_directional_buf_size(&context->config,
 						                      context->options.directional_buf_size);
 	}
+#endif
 
 #if defined(MBEDTLS_SSL_EARLY_DATA)
 	mbedtls_ssl_conf_early_data(&context->config, MBEDTLS_SSL_EARLY_DATA_ENABLED);
