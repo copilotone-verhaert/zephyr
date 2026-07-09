@@ -119,6 +119,8 @@ K_HEAP_DEFINE_NOCACHE(ep_buf_pool, 1024 * EP_BUF_NUMOF_BLOCKS);
 K_HEAP_DEFINE(ep_buf_pool, 1024 * EP_BUF_NUMOF_BLOCKS);
 #endif
 
+static K_MUTEX_DEFINE(usb_dc_mcux_conc_lock);
+
 struct usb_ep_ctrl_data {
 	usb_device_callback_message_struct_t transfer_message;
 	void *block;
@@ -696,19 +698,24 @@ int usb_dc_ep_read_continue(uint8_t ep)
 	uint8_t ep_abs_idx = EP_ABS_IDX(ep);
 	usb_status_t status;
 
+	k_mutex_lock(&usb_dc_mcux_conc_lock, K_FOREVER);
+
 	if (ep_abs_idx >= NUM_OF_EP_MAX ||
 	    USB_EP_GET_DIR(ep) != USB_EP_DIR_OUT) {
+		k_mutex_unlock(&usb_dc_mcux_conc_lock);
 		LOG_ERR("Wrong endpoint index/address/direction");
 		return -EINVAL;
 	}
 
 	if (dev_state.eps[ep_abs_idx].ep_occupied) {
+		k_mutex_unlock(&usb_dc_mcux_conc_lock);
 		LOG_WRN("endpoint 0x%x already occupied", ep);
 		return -EBUSY;
 	}
 
 	if (USB_EP_GET_IDX(ep) == USB_ENDPOINT_CONTROL) {
 		if (dev_state.setup_data_stage == SETUP_DATA_STAGE_DONE) {
+			k_mutex_unlock(&usb_dc_mcux_conc_lock);
 			return 0;
 		}
 
@@ -722,11 +729,14 @@ int usb_dc_ep_read_continue(uint8_t ep)
 			    (uint8_t *)dev_state.eps[ep_abs_idx].block,
 			    dev_state.eps[ep_abs_idx].ep_mps);
 	if (kStatus_USB_Success != status) {
+		k_mutex_unlock(&usb_dc_mcux_conc_lock);
 		LOG_ERR("Failed to enable reception on ep 0x%02x", ep);
 		return -EIO;
 	}
 
 	dev_state.eps[ep_abs_idx].ep_occupied = true;
+
+	k_mutex_unlock(&usb_dc_mcux_conc_lock);
 
 	return 0;
 }
@@ -935,7 +945,9 @@ static void usb_mcux_thread_main(void *arg1, void *arg2, void *arg3)
 
 			memcpy(&dev_state.eps[ep_abs_idx].transfer_message, &msg,
 			       sizeof(usb_device_callback_message_struct_t));
+			k_mutex_lock(&usb_dc_mcux_conc_lock, K_FOREVER);
 			handle_transfer_msg(&dev_state.eps[ep_abs_idx].transfer_message);
+			k_mutex_unlock(&usb_dc_mcux_conc_lock);
 		}
 	}
 }
