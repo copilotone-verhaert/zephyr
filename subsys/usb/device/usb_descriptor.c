@@ -439,10 +439,6 @@ static int usb_fix_descriptor(struct usb_desc_header *head)
 		case USB_DESC_INTERFACE:
 			if_descr = (struct usb_if_descriptor *)head;
 			LOG_DBG("Interface descriptor %p", head);
-			if (if_descr->bAlternateSetting) {
-				LOG_DBG("Skip alternate interface");
-				break;
-			}
 
 			if (if_descr->bInterfaceNumber == 0U) {
 				cfg_data = usb_get_cfg_data(if_descr);
@@ -458,7 +454,12 @@ static int usb_fix_descriptor(struct usb_desc_header *head)
 				}
 			}
 
-			numof_ifaces++;
+			// [VERHAERT] This code was moved down in the case.
+			// The reason is that ipp-usb-0 is an alternate interface WITH a configuration. So the configuration needs to be applied but
+			// the interface number should not be incremented.
+			if (!if_descr->bAlternateSetting) {
+				numof_ifaces++;
+			}
 			break;
 		case USB_DESC_ENDPOINT:
 			if (!cfg_data) {
