@@ -34,7 +34,7 @@
 #else
 #define HEAP_MEM_ATTRIBUTES
 #endif /* CONFIG_MBEDTLS_HEAP_CUSTOM_SECTION */
-static unsigned char _mbedtls_heap[CONFIG_MBEDTLS_HEAP_SIZE] HEAP_MEM_ATTRIBUTES;
+__attribute__((section("EXT_PSRAM"))) static unsigned char _mbedtls_heap[CONFIG_MBEDTLS_HEAP_SIZE] HEAP_MEM_ATTRIBUTES;
 
 static void init_heap(void)
 {
