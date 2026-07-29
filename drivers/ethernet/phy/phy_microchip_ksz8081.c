@@ -542,6 +542,28 @@ static int phy_mc_ksz8081_link_cb_set(const struct device *dev,
 	return 0;
 }
 
+static void phy_mc_ksz8081_check_esd_lockup(const struct device *dev) {
+	int anlpar;
+	const struct mc_ksz8081_config *config = dev->config;
+
+	/* anlpar register becomes 0 when the PHY goes in lockup */
+	int ret = phy_mc_ksz8081_read(dev, MII_ANLPAR, &anlpar);
+	if (ret) {
+		return;
+	}
+
+	if(anlpar == 0 || anlpar == 0xFFFF) {
+		LOG_ERR("Discovered ESD lockup, trying phy reset");
+		/* Basically, run the same sequence as init except for GPIO-related configs */
+		phy_mc_ksz8081_reset(dev);
+		phy_mc_ksz8081_cfg_link(dev, config->default_speeds, 0);
+		phy_mc_ksz8081_config_interrupt(dev);
+		return;
+	}
+
+	return;
+}
+
 static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
@@ -564,6 +586,8 @@ static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
 		/* some overrides might need set on cold reset way late for some reason */
 		phy_mc_ksz8081_static_cfg(dev);
 	}
+
+	phy_mc_ksz8081_check_esd_lockup(dev);
 
 	/* (re)do autonegotiation if needed */
 	if (data->flags & KSZ8081_DO_AUTONEG_FLAG) {
