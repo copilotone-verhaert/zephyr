@@ -2112,6 +2112,7 @@ static NXP_WIFI_SET_FUNC_ATTR int nxp_wifi_recv(struct net_if *iface, struct net
 #endif
 
 	if (net_recv_data(iface, pkt) < 0) {
+		net_pkt_unref(pkt);
 		goto out;
 	}
 
