@@ -159,12 +159,12 @@ static int recv_data(struct net_socket_service_event *pev)
 	}
 
 	ret = zsock_recvfrom(pev->event.fd, dns_data->data,
-			     net_buf_max_len(dns_data), 0,
+			     net_buf_max_len(dns_data), ZSOCK_MSG_DONTWAIT,
 			     (struct sockaddr *)&addr, &addrlen);
 	if (ret < 0) {
 		ret = -errno;
-		NET_ERR("recv failed on IPv%d socket (%d)",
-			family == AF_INET ? 4 : 6, -ret);
+		NET_ERR("recv failed on IPv%d socket (%d), revents 0x%04x",
+			family == AF_INET ? 4 : 6, -ret, pev->event.revents);
 		goto free_buf;
 	}
 
