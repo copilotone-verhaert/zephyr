@@ -43,6 +43,14 @@ properties:
       Combine port A and port B data pins to support octal mode access by
       setting register field MCR0[COMBINATIONEN].
 
+  ipeds:
+    type: boolean
+    description: |
+      FlexSPI supports IPED (Inline PRINCE Encryption/Decryption).
+      When present, the memc driver discovers BootROM-provisioned IPED
+      regions from the IPEDCTXn registers and exposes them to the flash
+      driver for decrypted AHB reads.
+
   sck-differential-clock:
     type: boolean
     description: |

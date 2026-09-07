@@ -22,6 +22,17 @@
 #define NOR_WRITE_SIZE	1
 #define NOR_ERASE_VALUE	0xff
 
+/*
+ * IPED is only present on a few FlexSPI instances.  FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT
+ * is 0 (or undefined) on most NXP SoCs, while CONFIG_MEMC_MCUX_FLEXSPI_IPED defaults to y
+ * on every MEMC_MCUX_FLEXSPI platform — gate the IPED code paths on the feature macro too.
+ */
+#if defined(FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT) && \
+	(FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT > 0) && \
+	IS_ENABLED(CONFIG_MEMC_MCUX_FLEXSPI_IPED)
+#define FLASH_MCUX_FLEXSPI_IPED 1
+#endif
+
 #ifdef CONFIG_FLASH_MCUX_FLEXSPI_NOR_WRITE_BUFFER
 static uint8_t nor_write_buf[SPI_NOR_PAGE_SIZE];
 #endif
@@ -83,6 +94,17 @@ struct flash_flexspi_nor_data {
 	struct flash_pages_layout layout;
 #endif
 	struct flash_parameters flash_parameters;
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	/* Tracks the most recent contiguous erased range per IPED region so
+	 * reads of erased IPED area can return 0xFF directly.  Only one range
+	 * per region is tracked; a subsequent non-contiguous erase within the
+	 * same region replaces the previous entry.
+	 */
+	struct {
+		off_t offset;
+		size_t len;
+	} iped_erased[FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT];
+#endif
 };
 
 /*
@@ -344,6 +366,42 @@ static int flash_flexspi_nor_read(const struct device *dev, off_t offset,
 		return -EINVAL;
 	}
 
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	/*
+	 * Reads already go through the AHB memory-mapped path below, so IPED
+	 * decrypts written data inline with no extra handling needed. The one
+	 * gap: decrypting a freshly-erased (raw 0xFF) IPED region produces
+	 * garbage, since IPED assumes the bytes it reads are ciphertext. Short-
+	 * circuit reads that fall within the last-erased range of a region.
+	 * Also reject reads that straddle an IPED region boundary, since part
+	 * of the range would decrypt with the wrong context.
+	 */
+	{
+		bool iped_gcm = false;
+		size_t iped_idx = 0U;
+
+		if (memc_flexspi_offset_in_iped_region(&data->controller, data->port, offset, len,
+						       &iped_gcm, &iped_idx)) {
+			if (data->iped_erased[iped_idx].len > 0U &&
+			    offset >= data->iped_erased[iped_idx].offset &&
+			    (offset + (off_t)len) <= (data->iped_erased[iped_idx].offset +
+						      (off_t)data->iped_erased[iped_idx].len)) {
+				memset(buffer, 0xFF, len);
+				return 0;
+			}
+
+			if (iped_gcm) {
+				LOG_WRN("IPED GCM AHB read off 0x%lx len %zu - "
+					"HW handles auth; tampered data triggers chip reset",
+					(long)offset, len);
+			}
+		} else if (memc_flexspi_iped_any_overlap(&data->controller, data->port, offset,
+							 len)) {
+			return -EINVAL;
+		}
+	}
+#endif /* FLASH_MCUX_FLEXSPI_IPED */
+
 	uint8_t *src = memc_flexspi_get_ahb_address(&data->controller,
 						    data->port,
 						    offset);
@@ -366,6 +424,36 @@ static int flash_flexspi_nor_write(const struct device *dev, off_t offset,
 		return -EINVAL;
 	}
 
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	{
+		bool wr_gcm = false;
+		bool in_iped = memc_flexspi_offset_in_iped_region(&data->controller, data->port,
+								  offset, len, &wr_gcm, NULL);
+
+		if (!in_iped &&
+		    memc_flexspi_iped_any_overlap(&data->controller, data->port, offset, len)) {
+			LOG_ERR("Write partially overlaps an IPED region boundary - "
+				"unsupported, would mix plaintext and ciphertext");
+			return -EINVAL;
+		}
+
+		if (in_iped && !memc_flexspi_iped_ipwr_enabled(&data->controller)) {
+			LOG_ERR("Write to IPED region, but IPWR_EN is not set - "
+				"data would be stored as plaintext while AHB reads decrypt it");
+			return -ENOTSUP;
+		}
+
+		if (in_iped && wr_gcm) {
+			LOG_ERR("Write to GCM-mode IPED region rejected - "
+				"would corrupt auth tag and trigger chip reset on read");
+			return -ENOTSUP;
+		}
+	}
+#endif /* FLASH_MCUX_FLEXSPI_IPED */
+
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	off_t write_offset = offset;
+#endif
 	size_t size = len;
 	uint8_t *src = (uint8_t *) buffer;
 	int i;
@@ -423,6 +511,17 @@ static int flash_flexspi_nor_write(const struct device *dev, off_t offset,
 	DCACHE_InvalidateByRange((uint32_t) dst, size);
 #endif
 
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	{
+		size_t wr_iped_idx = 0U;
+
+		if (memc_flexspi_offset_in_iped_region(&data->controller, data->port,
+						       write_offset, size, NULL, &wr_iped_idx)) {
+			data->iped_erased[wr_iped_idx].len = 0U;
+		}
+	}
+#endif
+
 	return 0;
 }
 
@@ -434,6 +533,19 @@ static int flash_flexspi_nor_erase(const struct device *dev, off_t offset,
 	if (!area_is_subregion(dev, offset, size)) {
 		return -EINVAL;
 	}
+
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	off_t erase_offset = offset;
+	bool er_in_iped = memc_flexspi_offset_in_iped_region(&data->controller, data->port,
+							     offset, size, NULL, NULL);
+
+	if (!er_in_iped &&
+	    memc_flexspi_iped_any_overlap(&data->controller, data->port, offset, size)) {
+		LOG_ERR("Erase partially overlaps an IPED region boundary - "
+			"unsupported, erased-range tracking would be inconsistent");
+		return -EINVAL;
+	}
+#endif /* FLASH_MCUX_FLEXSPI_IPED */
 
 	const size_t num_sectors = size / SPI_NOR_SECTOR_SIZE;
 	const size_t num_blocks = size / SPI_NOR_BLOCK_SIZE;
@@ -495,6 +607,18 @@ static int flash_flexspi_nor_erase(const struct device *dev, off_t offset,
 
 #ifdef CONFIG_HAS_MCUX_CACHE
 	DCACHE_InvalidateByRange((uint32_t) dst, size);
+#endif
+
+#ifdef FLASH_MCUX_FLEXSPI_IPED
+	{
+		size_t er_iped_idx = 0U;
+
+		if (memc_flexspi_offset_in_iped_region(&data->controller, data->port,
+						       erase_offset, size, NULL, &er_iped_idx)) {
+			data->iped_erased[er_iped_idx].offset = erase_offset;
+			data->iped_erased[er_iped_idx].len = size;
+		}
+	}
 #endif
 
 	return 0;

@@ -15,6 +15,29 @@
 
 #include "memc_mcux_flexspi.h"
 
+/*
+ * IPED (Inline Prince Encryption/Decryption) is a FlexSPI feature on some chips
+ * (e.g. RW612).  FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT is undefined or 0 when the
+ * FlexSPI has no IPED.  When present, this driver discovers BootROM-provisioned
+ * IPED regions at init and exposes them via memc_flexspi_offset_in_iped_region().
+ *
+ * Only the peripheral register definitions from the device header are needed;
+ * the SDK fsl_iped driver component is not required.
+ */
+#if DT_ANY_INST_HAS_BOOL_STATUS_OKAY(ipeds) && \
+	IS_ENABLED(CONFIG_MEMC_MCUX_FLEXSPI_IPED)
+#define MEMC_FLEXSPI_IPED            1
+BUILD_ASSERT(FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT > 0,
+	     "IPED DT property set on a FlexSPI without IPED support");
+/* Stride between IPEDCTXn register groups (IV0, IV1, START, END, AAD0, AAD1, rsvd, rsvd) */
+#define MEMC_FLEXSPI_IPED_CTX_STRIDE 0x20U
+BUILD_ASSERT(offsetof(FLEXSPI_Type, IPEDCTX1START) - offsetof(FLEXSPI_Type, IPEDCTX0START) ==
+		     MEMC_FLEXSPI_IPED_CTX_STRIDE,
+	     "IPED context stride does not match register layout");
+#define MEMC_FLEXSPI_IPED_CFG(n) .ahb_size = DT_INST_REG_SIZE_BY_IDX(n, 1),
+#else
+#define MEMC_FLEXSPI_IPED_CFG(n)
+#endif /* FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT */
 
 /*
  * NOTE: If CONFIG_FLASH_MCUX_FLEXSPI_XIP is selected, Any external functions
@@ -68,6 +91,17 @@ FSL_FEATURE_FLEXSPI_SUPPORT_SEPERATE_RXCLKSRC_PORTB
 	uint8_t buf_cfg_cnt;
 	const struct device *clock_dev;
 	clock_control_subsys_t clock_subsys;
+#ifdef MEMC_FLEXSPI_IPED
+	size_t ahb_size;
+	/* IPED regions discovered from registers at init (no IPED register writes) */
+	bool iped_enabled; /* IPEDCTRL.IPED_EN */
+	size_t iped_region_count;
+	struct {
+		uintptr_t ahb_start; /* AHB start, normalized to DTS base */
+		uintptr_t ahb_end;   /* AHB end (exclusive), normalized */
+		bool gcm;            /* per-region GCM-mode bit */
+	} iped_regions[FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT];
+#endif
 };
 
 void memc_flexspi_wait_bus_idle(const struct device *dev)
@@ -308,6 +342,128 @@ void *memc_flexspi_get_ahb_address(const struct device *dev,
 	return data->ahb_base + offset;
 }
 
+bool memc_flexspi_offset_in_iped_region(const struct device *dev, flexspi_port_t port, off_t offset,
+					size_t len, bool *gcm, size_t *region_idx)
+{
+#ifdef MEMC_FLEXSPI_IPED
+	struct memc_flexspi_data *data = dev->data;
+	uintptr_t addr;
+	size_t i;
+
+	if (!data->iped_enabled || len == 0U || offset < 0) {
+		return false;
+	}
+
+	addr = (uintptr_t)memc_flexspi_get_ahb_address(dev, port, offset);
+	if (addr == 0U) {
+		return false;
+	}
+	for (i = 0U; i < data->iped_region_count; i++) {
+		uintptr_t start = data->iped_regions[i].ahb_start;
+		uintptr_t end = data->iped_regions[i].ahb_end;
+
+		if (addr >= start && addr < end && len <= (size_t)(end - addr)) {
+			if (gcm != NULL) {
+				*gcm = data->iped_regions[i].gcm;
+			}
+			if (region_idx != NULL) {
+				*region_idx = i;
+			}
+			return true;
+		}
+	}
+
+	return false;
+#else
+	ARG_UNUSED(dev);
+	ARG_UNUSED(port);
+	ARG_UNUSED(offset);
+	ARG_UNUSED(len);
+	ARG_UNUSED(gcm);
+	ARG_UNUSED(region_idx);
+	return false;
+#endif /* MEMC_FLEXSPI_IPED */
+}
+
+bool memc_flexspi_iped_any_overlap(const struct device *dev, flexspi_port_t port, off_t offset,
+				   size_t len)
+{
+#ifdef MEMC_FLEXSPI_IPED
+	struct memc_flexspi_data *data = dev->data;
+	uintptr_t addr;
+	size_t i;
+
+	if (!data->iped_enabled || len == 0U || offset < 0) {
+		return false;
+	}
+
+	addr = (uintptr_t)memc_flexspi_get_ahb_address(dev, port, offset);
+	if (addr == 0U) {
+		return false;
+	}
+	for (i = 0U; i < data->iped_region_count; i++) {
+		uintptr_t start = data->iped_regions[i].ahb_start;
+		uintptr_t end = data->iped_regions[i].ahb_end;
+
+		if (addr < end && (addr + len) > start) {
+			return true;
+		}
+	}
+
+	return false;
+#else
+	ARG_UNUSED(dev);
+	ARG_UNUSED(port);
+	ARG_UNUSED(offset);
+	ARG_UNUSED(len);
+	return false;
+#endif /* MEMC_FLEXSPI_IPED */
+}
+
+bool memc_flexspi_iped_ipwr_enabled(const struct device *dev)
+{
+#ifdef MEMC_FLEXSPI_IPED
+	struct memc_flexspi_data *data = dev->data;
+
+	if (!data->iped_enabled) {
+		return false;
+	}
+
+	/* Read the register live: IPWR_EN can be changed at runtime. */
+	return (data->base->IPEDCTRL & FLEXSPI_IPEDCTRL_IPWR_EN_MASK) != 0U;
+#else
+	ARG_UNUSED(dev);
+	return false;
+#endif
+}
+
+int memc_flexspi_iped_ipwr_enable(const struct device *dev, bool enable)
+{
+#ifdef MEMC_FLEXSPI_IPED
+	struct memc_flexspi_data *data = dev->data;
+	unsigned int key;
+
+	if (!data->iped_enabled) {
+		return -ENOTSUP;
+	}
+
+	key = irq_lock();
+	memc_flexspi_wait_bus_idle(dev);
+	if (enable) {
+		data->base->IPEDCTRL |= FLEXSPI_IPEDCTRL_IPWR_EN_MASK;
+	} else {
+		data->base->IPEDCTRL &= ~FLEXSPI_IPEDCTRL_IPWR_EN_MASK;
+	}
+	irq_unlock(key);
+
+	return 0;
+#else
+	ARG_UNUSED(dev);
+	ARG_UNUSED(enable);
+	return -ENOTSUP;
+#endif
+}
+
 static int memc_flexspi_init(const struct device *dev)
 {
 	struct memc_flexspi_data *data = dev->data;
@@ -315,6 +471,71 @@ static int memc_flexspi_init(const struct device *dev)
 	uint32_t flash_sizes[kFLEXSPI_PortCount];
 	int ret;
 	uint8_t i;
+
+#ifdef MEMC_FLEXSPI_IPED
+	/*
+	 * IPED region discovery — reads IPEDCTRL.IPED_EN and the per-region
+	 * IPEDCTXnSTART/END registers loaded by BootROM during provisioning and
+	 * records them in driver data.  Zephyr never writes IPED registers here.
+	 * The FlexSPI NOR flash driver later queries this table via
+	 * memc_flexspi_offset_in_iped_region() to route reads of an IPED region
+	 * through the AHB path, where IPED decrypts inline.
+	 *
+	 * This must run before the XIP early-return below, because IPED register
+	 * reads are safe during XIP and the rest of init is skipped in XIP mode.
+	 */
+	uint32_t ipedctrl = data->base->IPEDCTRL;
+
+	data->iped_enabled = (ipedctrl & FLEXSPI_IPEDCTRL_IPED_EN_MASK) != 0U;
+	data->iped_region_count = 0U;
+
+	if (data->iped_enabled) {
+		uintptr_t ahb_base = (uintptr_t)data->ahb_base;
+		uintptr_t offset_mask = data->ahb_size - 1U;
+		uint32_t iped_i;
+
+		for (iped_i = 0U; iped_i < (uint32_t)FSL_FEATURE_FLEXSPI_IPED_REGION_COUNT;
+		     iped_i++) {
+			volatile uint32_t *ctx_start_reg =
+				(volatile uint32_t *)((uintptr_t)&data->base->IPEDCTX0START +
+						      MEMC_FLEXSPI_IPED_CTX_STRIDE * iped_i);
+			volatile uint32_t *ctx_end_reg =
+				(volatile uint32_t *)((uintptr_t)&data->base->IPEDCTX0END +
+						      MEMC_FLEXSPI_IPED_CTX_STRIDE * iped_i);
+			uint32_t raw_start = *ctx_start_reg;
+			uint32_t raw_end = *ctx_end_reg;
+			uint32_t region_start =
+				raw_start & FLEXSPI_IPEDCTX0START_START_ADDRESS_MASK;
+			uint32_t region_end = raw_end & FLEXSPI_IPEDCTX0END_END_ADDRESS_MASK;
+			uintptr_t iped_start, iped_end;
+
+			if (region_start == 0U) {
+				continue;
+			}
+			/*
+			 * IPED registers may store addresses using a different
+			 * bus alias than the DTS AHB base. Normalize by
+			 * extracting the flash offset and rebasing onto ahb_base.
+			 */
+			iped_start = ahb_base + ((uintptr_t)region_start & offset_mask);
+			iped_end = ahb_base + ((uintptr_t)region_end & offset_mask);
+			data->iped_regions[data->iped_region_count].ahb_start = iped_start;
+			data->iped_regions[data->iped_region_count].ahb_end = iped_end;
+			data->iped_regions[data->iped_region_count].gcm =
+				(raw_start & FLEXSPI_IPEDCTX0START_GCM_MASK) != 0U;
+			if (!memc_flexspi_is_running_xip(dev)) {
+				LOG_INF("IPED region %u: AHB 0x%08lx..0x%08lx (excl) GCM=%u",
+					iped_i, (unsigned long)iped_start, (unsigned long)iped_end,
+					data->iped_regions[data->iped_region_count].gcm ? 1U : 0U);
+			}
+			data->iped_region_count++;
+		}
+	} else {
+		if (!memc_flexspi_is_running_xip(dev)) {
+			LOG_DBG("IPED capable chip but IPEDCTRL.IPED_EN=0");
+		}
+	}
+#endif /* MEMC_FLEXSPI_IPED */
 
 	/* we should not configure the device we are running on */
 	if (memc_flexspi_is_running_xip(dev)) {
@@ -472,6 +693,7 @@ static int memc_flexspi_pm_action(const struct device *dev, enum pm_device_actio
 		.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(n)),     \
 		.clock_subsys = (clock_control_subsys_t)                \
 			DT_INST_CLOCKS_CELL(n, name),                   \
+		MEMC_FLEXSPI_IPED_CFG(n)					\
 	};								\
 									\
 	PM_DEVICE_DT_INST_DEFINE(n, memc_flexspi_pm_action);		\
