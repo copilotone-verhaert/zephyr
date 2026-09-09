@@ -1113,25 +1113,57 @@ static int flash_flexspi_nor_check_jedec(struct flash_flexspi_nor_data *data,
 	case 0x16609d: /* IS25LP032 */
 	case 0x17609d: /* IS25LP064 */
 	case 0x18609d: /* IS25LP128 */
+	case 0x19609d: /* IS25LP256 */
+	case 0x20609d: /* IS25LP512 */
 	case 0x16709d: /* IS25WP032 */
 	case 0x17709d: /* IS25WP064 */
 	case 0x18709d: /* IS25WP128 */
-		/*
-		 * We can support this flash with the JEDEC probe, but we need to
-		 * ensure Dummy Cycles are at the default value
-		 */
-		ret = flash_flexspi_nor_is25_clear_dummy_cycles(data, flexspi_lut);
-		if (ret < 0) {
-			while (1) {
-				/*
-				 * Spin here, this flash won't configure correctly.
-				 * We can't print a warning, as we are unlikely to
-				 * be able to XIP at this point.
-				 */
-			}
-		}
-		/* Still return an error- we want the JEDEC configuration to run */
-		return -ENOTSUP;
+
+		 /* Fast read */
+		flexspi_lut[READ][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_4READ_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_4PAD, 0x20);
+		flexspi_lut[READ][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_MODE8_SDR, kFLEXSPI_4PAD, 0xF0,
+				kFLEXSPI_Command_DUMMY_SDR, kFLEXSPI_4PAD, 0x04);
+		flexspi_lut[READ][2] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_READ_SDR, kFLEXSPI_4PAD, 0x04,
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x00);
+		/* Only 1S-1S-4S page program supported */
+		flexspi_lut[PAGE_PROGRAM][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_PP_1_1_4_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 0x20);
+		flexspi_lut[PAGE_PROGRAM][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_WRITE_SDR, kFLEXSPI_4PAD, 0x4,
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x0);
+		/* Sector erase */
+		flexspi_lut[ERASE_SECTOR][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_SE_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 0x20);
+		flexspi_lut[ERASE_SECTOR][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x00, 0x00, 0x00, 0x00);
+		/* Block erase */
+		flexspi_lut[ERASE_BLOCK][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_BE_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 0x20);
+		flexspi_lut[ERASE_BLOCK][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x00, 0x00, 0x00, 0x00);
+		/* Page program */
+		flexspi_lut[PAGE_PROGRAM][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_PP_1_1_4_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 0x20);
+		flexspi_lut[PAGE_PROGRAM][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_WRITE_SDR, kFLEXSPI_4PAD, 0x04,
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x00);
+
+				/* Read instruction used for polling is 0x05 */
+		data->legacy_poll = true;
+		flexspi_lut[READ_STATUS_REG][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_RDSR,
+				kFLEXSPI_Command_READ_SDR, kFLEXSPI_1PAD, 0x01);
+		/* Device uses bit 6 of status reg 1 for QE */
+		return flash_flexspi_nor_quad_enable(data, flexspi_lut, JESD216_DW15_QER_VAL_S1B6);
+
 	case 0x2040ef:
 		/* W25Q512JV-IQ/IN flash, use 4 byte read/write */
 		flexspi_lut[READ][0] = FLEXSPI_LUT_SEQ(
