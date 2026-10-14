@@ -262,8 +262,9 @@ config BT_SETTINGS_DELAYED_STORE
 	  thread for too long.
 
 config BT_SETTINGS_DELAYED_STORE_MS
-	int
+    int "Bluetooth settings delayed store timeout (ms)"
 	default 1000
+	depends on BT_SETTINGS_DELAYED_STORE
 	help
 	  (Advanced) Governs the timeout after which the settings write will
 	  take effect.
