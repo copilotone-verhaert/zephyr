@@ -14,6 +14,9 @@
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/sys_clock.h>
+#ifdef CONFIG_SOC_SERIES_RW6XX
+#include <fsl_clock.h>
+#endif
 
 struct nxp_enet_mdio_config {
 	const struct pinctrl_dev_config *pincfg;
@@ -173,8 +176,18 @@ static void nxp_enet_mdio_post_module_reset_init(const struct device *dev)
 	uint32_t enet_module_clock_rate;
 
 	/* Set up MSCR register */
+#ifdef CONFIG_SOC_SERIES_RW6XX
+	/* MDC and the MDIO hold time count IPS bus clock cycles (RW61x UM 33.2.13.3),
+	 * the main clock in NXP's RW612 SDK examples. The module clock reports the
+	 * 50 MHz RMII reference instead, which gives a 5x too fast MDC and a hold time
+	 * below the 10 ns of IEEE 802.3. If the bus clock were the slower one, the
+	 * result only gets slower, never out of spec.
+	 */
+	enet_module_clock_rate = CLOCK_GetMainClkFreq();
+#else
 	(void) clock_control_get_rate(config->clock_dev, config->clock_subsys,
 							&enet_module_clock_rate);
+#endif
 	uint32_t mii_speed = (enet_module_clock_rate + 2 * config->mdc_freq - 1) /
 					(2 * config->mdc_freq) - 1;
 	uint32_t holdtime = (10 + NSEC_PER_SEC / enet_module_clock_rate - 1) /
