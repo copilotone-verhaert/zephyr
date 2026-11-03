@@ -732,6 +732,9 @@ static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
 		}
 	}
 
+	/* Not gated on rc: with ANLPAR 0, update_link() finds no common mode and fails */
+	phy_mc_ksz8081_check_esd_lockup(dev);
+
 	if (turn_on_logs) {
 		/* something wrong, if it happens again, we'll get logs next time */
 		data->flags &= ~KSZ8081_SILENCE_DEBUG_LOGS;
