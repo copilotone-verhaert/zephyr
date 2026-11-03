@@ -40,6 +40,10 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 #define PHY_MC_KSZ8081_ANER_LP_AN_ABLE		BIT(0)
 
+#define PHY_MC_KSZ8081_ID1			0x0022
+#define PHY_MC_KSZ8081_ID2_MODEL		0x1560
+#define PHY_MC_KSZ8081_ID2_MODEL_MASK		0xFFF0 /* low nibble: silicon revision */
+
 /* A PHY that doesn't answer on MDIO reads all ones through the MDIO pull-up */
 #define PHY_MC_KSZ8081_NOT_RESPONDING		0xFFFF
 
@@ -133,6 +137,22 @@ static int phy_mc_ksz8081_write(const struct device *dev,
 	return 0;
 }
 
+/* Read a register to modify and write back. All ones means that the PHY doesn't
+ * answer: writing that back would set every control bit once it answers again.
+ */
+static int phy_mc_ksz8081_read_for_update(const struct device *dev,
+					  uint16_t reg_addr, uint32_t *data)
+{
+	int ret;
+
+	ret = phy_mc_ksz8081_read(dev, reg_addr, data);
+	if (ret == 0 && *data == PHY_MC_KSZ8081_NOT_RESPONDING) {
+		return -EIO;
+	}
+
+	return ret;
+}
+
 #if !DT_ANY_INST_HAS_PROP_STATUS_OKAY(int_gpios)
 #define phy_mc_ksz8081_clear_interrupt(data) 0
 #else
@@ -221,7 +241,7 @@ static int phy_mc_ksz8081_autonegotiate(const struct device *dev)
 	}
 
 	/* Read control register to write back with autonegotiation bit */
-	ret = phy_mc_ksz8081_read(dev, MII_BMCR, &bmcr);
+	ret = phy_mc_ksz8081_read_for_update(dev, MII_BMCR, &bmcr);
 	if (ret) {
 		goto done;
 	}
@@ -383,7 +403,7 @@ static int phy_mc_ksz8081_static_cfg(const struct device *dev)
 	int ret = 0;
 
 	/* Force normal operation in the case of factory mode */
-	ret = phy_mc_ksz8081_read(dev, PHY_MC_KSZ8081_OMSO_REG, (uint32_t *)&omso);
+	ret = phy_mc_ksz8081_read_for_update(dev, PHY_MC_KSZ8081_OMSO_REG, &omso);
 	if (ret) {
 		return ret;
 	}
@@ -401,7 +421,7 @@ static int phy_mc_ksz8081_static_cfg(const struct device *dev)
 	}
 
 	/* Select correct reference clock mode depending on interface setup */
-	ret = phy_mc_ksz8081_read(dev, PHY_MC_KSZ8081_CTRL2_REG, (uint32_t *)&ctrl2);
+	ret = phy_mc_ksz8081_read_for_update(dev, PHY_MC_KSZ8081_CTRL2_REG, &ctrl2);
 	if (ret) {
 		return ret;
 	}
@@ -457,6 +477,33 @@ static int phy_mc_ksz8081_reset_gpio(const struct mc_ksz8081_config *config)
 }
 #endif /* DT_ANY_INST_HAS_PROP_STATUS_OKAY(reset_gpios) */
 
+/* A PHY that doesn't answer on MDIO reads 0xFFFF (pull-up) or 0x0000 (line held low) */
+static int phy_mc_ksz8081_check_id(const struct device *dev)
+{
+	const struct mc_ksz8081_config *config = dev->config;
+	uint32_t id1 = 0;
+	uint32_t id2 = 0;
+	int ret;
+
+	ret = phy_mc_ksz8081_read(dev, MII_PHYID1R, &id1);
+	if (ret) {
+		return ret;
+	}
+
+	ret = phy_mc_ksz8081_read(dev, MII_PHYID2R, &id2);
+	if (ret) {
+		return ret;
+	}
+
+	if (id1 != PHY_MC_KSZ8081_ID1 ||
+	    (id2 & PHY_MC_KSZ8081_ID2_MODEL_MASK) != PHY_MC_KSZ8081_ID2_MODEL) {
+		LOG_ERR("PHY %d not responding (ID 0x%04x 0x%04x)", config->addr, id1, id2);
+		return -EIO;
+	}
+
+	return 0;
+}
+
 static int phy_mc_ksz8081_reset(const struct device *dev)
 {
 	const struct mc_ksz8081_config *config = dev->config;
@@ -482,6 +529,12 @@ static int phy_mc_ksz8081_reset(const struct device *dev)
 		 */
 		k_busy_wait(500 * USEC_PER_MSEC);
 	} else if (ret) {
+		goto done;
+	}
+
+	/* Without the right ID, skip the static cfg: it would write 0xFFFF back */
+	ret = phy_mc_ksz8081_check_id(dev);
+	if (ret) {
 		goto done;
 	}
 
@@ -771,9 +824,12 @@ static int phy_mc_ksz8081_init(const struct device *dev)
 		return ret;
 	}
 
-	/* Reset PHY */
+	/* Reset PHY. A PHY that doesn't answer (-EIO) is logged by the reset, but the
+	 * device stays: the application reports the failure and MDIO stays usable for
+	 * diagnostics.
+	 */
 	ret = phy_mc_ksz8081_reset(dev);
-	if (ret) {
+	if (ret && ret != -EIO) {
 		return ret;
 	}
 
