@@ -38,6 +38,14 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define PHY_MC_KSZ8081_CTRL2_REG		0x1F
 #define PHY_MC_KSZ8081_CTRL2_REF_CLK_SEL	BIT(7)
 
+#define PHY_MC_KSZ8081_ANER_LP_AN_ABLE		BIT(0)
+
+/* A PHY that doesn't answer on MDIO reads all ones through the MDIO pull-up */
+#define PHY_MC_KSZ8081_NOT_RESPONDING		0xFFFF
+
+/* Minimum time between two resets for a suspected ESD lockup */
+#define PHY_MC_KSZ8081_ESD_RESET_INTERVAL_MS	30000
+
 enum ksz8081_interface {
 	KSZ8081_MII,
 	KSZ8081_RMII,
@@ -78,6 +86,7 @@ struct mc_ksz8081_data {
 	void *cb_data;
 	struct k_mutex mutex;
 	struct k_work_delayable phy_monitor_work;
+	int64_t esd_reset_time; /* uptime of the last ESD lockup reset, 0 if none */
 	uint8_t flags;
 };
 
@@ -306,6 +315,15 @@ static int phy_mc_ksz8081_update_link(const struct device *dev)
 	if (ret) {
 		goto done;
 	}
+
+	/* All ones has the link bit set, but means that the PHY doesn't answer */
+	if (bmsr == PHY_MC_KSZ8081_NOT_RESPONDING) {
+		LOG_ERR("PHY %d not responding (BMSR 0x%04x)", config->addr, bmsr);
+		state->is_up = false;
+		ret = -EIO;
+		goto done;
+	}
+
 	state->is_up = bmsr & MII_BMSR_LINK_STATUS;
 
 	if (!state->is_up) {
@@ -548,26 +566,60 @@ static int phy_mc_ksz8081_link_cb_set(const struct device *dev,
 	return 0;
 }
 
-static void phy_mc_ksz8081_check_esd_lockup(const struct device *dev) {
-	int anlpar;
+/* After an ESD event the PHY can keep the link up while ANLPAR reads 0. ANLPAR is
+ * also 0 without a link, before autonegotiation completes and with a link partner
+ * that doesn't autonegotiate (fixed speed), so only act on a link that is up and
+ * autonegotiated with a partner that autonegotiates. Call after update_link().
+ */
+static void phy_mc_ksz8081_check_esd_lockup(const struct device *dev)
+{
 	const struct mc_ksz8081_config *config = dev->config;
+	struct mc_ksz8081_data *data = dev->data;
+	uint32_t anlpar = 0;
+	uint32_t bmsr = 0;
+	uint32_t aner = 0;
+	int64_t now;
 
-	/* anlpar register becomes 0 when the PHY goes in lockup */
-	int ret = phy_mc_ksz8081_read(dev, MII_ANLPAR, &anlpar);
-	if (ret) {
+	if (!data->state.is_up) {
 		return;
 	}
 
-	if(anlpar == 0 || anlpar == 0xFFFF) {
-		LOG_ERR("Discovered ESD lockup, trying phy reset");
-		/* Basically, run the same sequence as init except for GPIO-related configs */
-		phy_mc_ksz8081_reset(dev);
-		phy_mc_ksz8081_cfg_link(dev, config->default_speeds, 0);
-		phy_mc_ksz8081_config_interrupt(dev);
+	if (phy_mc_ksz8081_read(dev, MII_ANLPAR, &anlpar) ||
+	    phy_mc_ksz8081_read(dev, MII_BMSR, &bmsr) ||
+	    phy_mc_ksz8081_read(dev, MII_ANER, &aner)) {
 		return;
 	}
 
-	return;
+	/* All ones is no lockup: the PHY doesn't answer, and a reset doesn't help.
+	 * update_link() reports it.
+	 */
+	if (anlpar != 0 || bmsr == PHY_MC_KSZ8081_NOT_RESPONDING ||
+	    aner == PHY_MC_KSZ8081_NOT_RESPONDING) {
+		return;
+	}
+
+	if (!(bmsr & MII_BMSR_AUTONEG_COMPLETE) || !(aner & PHY_MC_KSZ8081_ANER_LP_AN_ABLE)) {
+		return;
+	}
+
+	now = k_uptime_get();
+	if (data->esd_reset_time != 0 &&
+	    now - data->esd_reset_time < PHY_MC_KSZ8081_ESD_RESET_INTERVAL_MS) {
+		LOG_WRN("PHY %d: ESD lockup suspected, reset skipped (previous one %lld ms ago)",
+			config->addr, now - data->esd_reset_time);
+		return;
+	}
+	data->esd_reset_time = now;
+
+	LOG_ERR("PHY %d: ESD lockup suspected (link up, ANLPAR 0), resetting the PHY",
+		config->addr);
+	/* Basically, run the same sequence as init except for GPIO-related configs */
+	phy_mc_ksz8081_reset(dev);
+	phy_mc_ksz8081_cfg_link(dev, config->default_speeds, 0);
+	phy_mc_ksz8081_config_interrupt(dev);
+
+	/* The reset dropped the link while the PHY interrupts were off: check it again */
+	k_work_reschedule(&data->phy_monitor_work, K_MSEC(CONFIG_PHY_MONITOR_PERIOD));
 }
 
 static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
@@ -593,8 +645,6 @@ static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
 		phy_mc_ksz8081_static_cfg(dev);
 	}
 
-	phy_mc_ksz8081_check_esd_lockup(dev);
-
 	/* (re)do autonegotiation if needed */
 	if (data->flags & KSZ8081_DO_AUTONEG_FLAG) {
 		rc = phy_mc_ksz8081_autonegotiate(dev);
@@ -613,7 +663,11 @@ static void phy_mc_ksz8081_monitor_work_handler(struct k_work *work)
 	if (!turn_on_logs) {
 		turn_on_logs = (rc != 0);
 	}
-	if (rc == 0 && memcmp(&state, &data->state, sizeof(struct phy_link_state)) != 0) {
+	/* A PHY that stops answering fails update_link(), but must still take the
+	 * carrier down.
+	 */
+	if ((rc == 0 || !data->state.is_up) &&
+	    memcmp(&state, &data->state, sizeof(struct phy_link_state)) != 0) {
 		if (data->cb) {
 			data->cb(dev, &data->state, data->cb_data);
 		}
