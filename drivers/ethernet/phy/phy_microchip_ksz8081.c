@@ -416,11 +416,14 @@ static int phy_mc_ksz8081_reset_gpio(const struct mc_ksz8081_config *config)
 		return ret;
 	}
 
-	/* Wait for at least 500 us as specified by datasheet */
-	k_busy_wait(1000);
+	/* A reset during operation needs at least 500 us, a reset at power-up 10 ms
+	 * after the supplies are stable (datasheet Table 7-10). Always hold it for
+	 * 10 ms, so the PHY gets the full power-up time with the reference clock
+	 * already running.
+	 */
+	k_msleep(10);
 
 	ret = gpio_pin_set_dt(&config->reset_gpio, 0);
-
 
 	/* After deasserting reset, must wait at least 100 us to use programming interface */
 	k_busy_wait(200);
