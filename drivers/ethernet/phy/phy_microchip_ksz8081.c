@@ -450,21 +450,24 @@ static int phy_mc_ksz8081_reset(const struct device *dev)
 	}
 
 	ret = phy_mc_ksz8081_reset_gpio(config);
-	if (ret != -ENODEV) { /* On -ENODEV, attempt command-based reset */
+	if (ret == -ENODEV) { /* No reset GPIO: attempt command-based reset */
+		ret = phy_mc_ksz8081_write(dev, MII_BMCR, MII_BMCR_RESET);
+		if (ret) {
+			goto done;
+		}
+
+		/* According to IEEE 802.3, Section 2, Subsection 22.2.4.1.1,
+		 * a PHY reset may take up to 0.5 s.
+		 */
+		k_busy_wait(500 * USEC_PER_MSEC);
+	} else if (ret) {
 		goto done;
 	}
 
-	ret = phy_mc_ksz8081_write(dev, MII_BMCR, MII_BMCR_RESET);
-	if (ret) {
-		goto done;
-	}
-
-	/* According to IEEE 802.3, Section 2, Subsection 22.2.4.1.1,
-	 * a PHY reset may take up to 0.5 s.
+	/* After each reset we will apply the static cfg from DT, also after a GPIO
+	 * reset: the PHY comes out of every reset in its strapped clock mode (25 MHz),
+	 * and only CTRL2 REF_CLK_SEL selects the 50 MHz RMII reference clock.
 	 */
-	k_busy_wait(500 * USEC_PER_MSEC);
-
-	/* After each reset we will apply the static cfg from DT */
 	ret = phy_mc_ksz8081_static_cfg(dev);
 	if (ret) {
 		goto done;
