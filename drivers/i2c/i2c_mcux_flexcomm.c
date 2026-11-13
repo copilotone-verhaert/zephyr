@@ -266,18 +266,28 @@ static int mcux_flexcomm_transfer(const struct device *dev,
 }
 
 #if CONFIG_I2C_MCUX_FLEXCOMM_BUS_RECOVERY
+/* I2C lines are open-drain: never drive them high. Drive a line low as an output and release
+ * it as an input with the pull-up enabled. Not every GPIO driver implements GPIO_OPEN_DRAIN
+ * (the RW61x one silently ignores it), and driving SDA high while a target still holds it low,
+ * which is the very state bus recovery is for, would short the two drivers.
+ */
+static int mcux_flexcomm_bitbang_set_line(const struct gpio_dt_spec *line, int state)
+{
+	return gpio_pin_configure_dt(line, state ? (GPIO_INPUT | GPIO_PULL_UP) : GPIO_OUTPUT_LOW);
+}
+
 static void mcux_flexcomm_bitbang_set_scl(void *io_context, int state)
 {
 	const struct mcux_flexcomm_config *config = io_context;
 
-	gpio_pin_set_dt(&config->scl, state);
+	(void)mcux_flexcomm_bitbang_set_line(&config->scl, state);
 }
 
 static void mcux_flexcomm_bitbang_set_sda(void *io_context, int state)
 {
 	const struct mcux_flexcomm_config *config = io_context;
 
-	gpio_pin_set_dt(&config->sda, state);
+	(void)mcux_flexcomm_bitbang_set_line(&config->sda, state);
 }
 
 static int mcux_flexcomm_bitbang_get_sda(void *io_context)
@@ -312,13 +322,14 @@ static int mcux_flexcomm_recover_bus(const struct device *dev)
 
 	k_sem_take(&data->lock, K_FOREVER);
 
-	error = gpio_pin_configure_dt(&config->scl, GPIO_OUTPUT_HIGH);
+	/* Take both lines from the controller, released (high) */
+	error = mcux_flexcomm_bitbang_set_line(&config->scl, 1);
 	if (error != 0) {
 		LOG_ERR("failed to configure SCL GPIO (err %d)", error);
 		goto restore;
 	}
 
-	error = gpio_pin_configure_dt(&config->sda, GPIO_OUTPUT_HIGH);
+	error = mcux_flexcomm_bitbang_set_line(&config->sda, 1);
 	if (error != 0) {
 		LOG_ERR("failed to configure SDA GPIO (err %d)", error);
 		goto restore;
@@ -341,6 +352,12 @@ static int mcux_flexcomm_recover_bus(const struct device *dev)
 
 restore:
 	(void)pinctrl_apply_state(config->pincfg, PINCTRL_STATE_DEFAULT);
+
+	/* The controller saw its pins disappear during the bit-banging: reset its master
+	 * function so the next transfer starts from idle.
+	 */
+	I2C_MasterEnable(config->base, false);
+	I2C_MasterEnable(config->base, true);
 
 	k_sem_give(&data->lock);
 
