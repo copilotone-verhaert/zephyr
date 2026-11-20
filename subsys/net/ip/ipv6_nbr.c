@@ -449,6 +449,36 @@ static void ipv6_ns_reply_timeout(struct k_work *work)
 				continue;
 			}
 
+			/* Save what we still need before the reference is
+			 * released below.
+			 */
+			struct net_if *ns_iface = net_pkt_iface(pending);
+			struct in6_addr ns_tgt;
+
+			net_ipv6_addr_copy_raw(ns_tgt.s6_addr,
+					       NET_IPV6_HDR(pending)->dst);
+
+			/* The reference taken by the k_fifo_get above is no
+			 * longer needed: prepare_for_send has re-parked the
+			 * packet with its own reference.
+			 */
+			net_pkt_unref(pending);
+
+			/* Re-arm the NS reply timer and send a new NS for the
+			 * packets still queued. Without this the queue stalls:
+			 * the re-parked packet only goes through the append
+			 * branch, which sends no NS and arms no timer.
+			 */
+			data->send_ns = k_uptime_get();
+
+			if (!k_work_delayable_remaining_get(&ipv6_ns_reply_timer)) {
+				k_work_reschedule(&ipv6_ns_reply_timer,
+						  K_MSEC(NS_REPLY_TIMEOUT));
+			}
+
+			(void)net_ipv6_send_ns(ns_iface, NULL, NULL, NULL,
+					       &ns_tgt, false);
+
 			/* Now wait timeout again */
 			break;
 		}
@@ -2128,6 +2158,7 @@ int net_ipv6_send_ns(struct net_if *iface,
 
 			/* Let the system timeout and then send the NS again */
 			net_ipv6_nbr_unlock();
+			net_pkt_unref(pkt);
 			return 0;
 		}
 	}
